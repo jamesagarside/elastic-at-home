@@ -1,0 +1,42 @@
+# Traefik Static Configuration - Self-Signed Mode
+#
+# This configuration uses Elasticsearch-generated certificates via Traefik.
+# No ACME/Let's Encrypt - works in air-gapped environments.
+#
+# Usage: Copy this file to traefik.yml (or symlink it)
+#   cp traefik-selfsigned.yml traefik.yml
+#
+# Clients will need to trust the CA certificate from:
+#   docker cp $(docker compose ps -q setup):/certs/ca/ca.crt ./ca.crt
+
+api:
+  insecure: true
+  dashboard: true
+
+ping: true
+
+accessLog:
+  format: json
+
+providers:
+  docker:
+    exposedByDefault: false
+  file:
+    filename: /etc/traefik/dynamic.yaml
+
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+  syslog-tcp:
+    address: ":514"
+  syslog-udp:
+    address: ":514/udp"
+
+# No certificatesResolvers - uses default certificate from dynamic.yaml

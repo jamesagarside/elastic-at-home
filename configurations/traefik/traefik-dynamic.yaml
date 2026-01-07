@@ -1,0 +1,37 @@
+# Traefik Dynamic Configuration
+#
+# This file configures:
+# 1. Default TLS certificate for self-signed mode (uses ES-generated certs)
+# 2. ServersTransports for backend TLS verification using certificate DNS names
+#
+# When CERT_RESOLVER is empty, Traefik uses the default certificate below.
+# When CERT_RESOLVER=letsencrypt, ACME fetches certs and this is ignored.
+
+# TLS Configuration - Default certificate for self-signed mode
+tls:
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /certs/traefik/traefik.crt
+        keyFile: /certs/traefik/traefik.key
+
+http:
+  serversTransports:
+    # Transport for Elasticsearch backend
+    es-transport:
+      serverName: "es01"
+      rootCAs:
+        - /certs/ca/ca.crt
+
+    # Transport for Kibana backend
+    kibana-transport:
+      serverName: "kibana"
+      rootCAs:
+        - /certs/ca/ca.crt
+
+    # Transport for Fleet Server backend (also serves APM)
+    # Both fleet and apm routes use this transport since they share the same backend
+    fleet-transport:
+      serverName: "fleet-server"
+      rootCAs:
+        - /certs/ca/ca.crt

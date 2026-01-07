@@ -1,0 +1,44 @@
+services:
+  agent:
+    hostname: siem-agent
+    depends_on:
+      fleet-server:
+        condition: service_healthy
+    image: docker.elastic.co/elastic-agent/elastic-agent:${STACK_VERSION}
+    volumes:
+      - certs:/certs
+      - agentdata:/usr/share/elastic-agent
+    networks:
+      - elastic
+    user: root
+    # Map external domains to Docker host so agent can reach Traefik
+    extra_hosts:
+      - "${ES_DOMAIN_NAME}:host-gateway"
+      - "${FLEET_DOMAIN_NAME}:host-gateway"
+      - "${KIBANA_DOMAIN_NAME}:host-gateway"
+    environment:
+      # Fleet enrollment via external URL (Let's Encrypt - uses system CAs)
+      - FLEET_ENROLL=1
+      - FLEET_URL=https://${FLEET_DOMAIN_NAME}:443
+      # Kibana settings for enrollment token retrieval (internal)
+      - KIBANA_HOST=https://${KIBANA_DOMAIN_NAME}:443
+      - KIBANA_FLEET_USERNAME=elastic
+      - KIBANA_FLEET_PASSWORD=${ELASTIC_PASSWORD}
+      - FLEET_TOKEN_POLICY_NAME=SIEM Agent Policy
+    labels:
+      - "traefik.enable=true"
+      # TCP Router for syslog over TCP (restricted by source IP)
+      - "traefik.tcp.routers.agent-tcp.rule=ClientIP(`${ALLOWED_SYSLOG_IPS}`)"
+      - "traefik.tcp.routers.agent-tcp.entrypoints=syslog-tcp"
+      - "traefik.tcp.routers.agent-tcp.service=agent-tcp"
+      - "traefik.tcp.services.agent-tcp.loadbalancer.server.port=8080"
+      # UDP Router for syslog over UDP
+      # Only enable this if you need to as Traefik UDP routers dont support rules
+      # so we cant filter based on Source IP.
+      - "traefik.udp.routers.agent-udp.entrypoints=syslog-udp"
+      - "traefik.udp.routers.agent-udp.service=agent-udp"
+      - "traefik.udp.services.agent-udp.loadbalancer.server.port=8080"
+    mem_limit: ${AGENT_MEM_LIMIT}
+volumes:
+  agentdata:
+    driver: local

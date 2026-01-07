@@ -1,0 +1,61 @@
+# Traefik Static Configuration - Let's Encrypt Mode
+#
+# This configuration uses Let's Encrypt with Cloudflare DNS challenge
+# for publicly trusted TLS certificates.
+#
+# Prerequisites (all set in .env file):
+# 1. CERT_RESOLVER=letsencrypt
+# 2. ACME_EMAIL=your-email@example.com
+# 3. CF_DNS_API_TOKEN=your-cloudflare-api-token
+#
+# This file is auto-selected when CERT_RESOLVER=letsencrypt
+
+api:
+  insecure: true
+  dashboard: true
+
+ping: true
+
+accessLog:
+  format: json
+
+providers:
+  docker:
+    exposedByDefault: false
+  file:
+    filename: /etc/traefik/dynamic.yaml
+
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+  syslog-tcp:
+    address: ":514"
+  syslog-udp:
+    address: ":514/udp"
+
+# Let's Encrypt ACME Configuration
+# Email is set via ACME_EMAIL env var in .env file
+#
+# Note: If ACME fails with SERVFAIL errors, Traefik will automatically retry
+# with exponential backoff. The default certificate from traefik-dynamic.yaml
+# is served while retrying. Common causes of SERVFAIL:
+# - Transient DNS issues (usually resolves on retry)
+# - Zone not properly delegated to Cloudflare
+# - CF_DNS_API_TOKEN lacking Zone:Zone:Read permission
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      storage: /letsencrypt/acme.json
+      dnsChallenge:
+        provider: cloudflare
+        # Wait 90 seconds for DNS propagation before ACME verification
+        delayBeforeCheck: 90
+        # Skip Traefik's own propagation check (Let's Encrypt will verify)
+        disablePropagationCheck: true

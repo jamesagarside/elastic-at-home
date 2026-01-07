@@ -1,0 +1,5 @@
+.claude/
+.env
+.env.pi
+.structurizr
+workspace.json

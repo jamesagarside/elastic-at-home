@@ -1,0 +1,57 @@
+services:
+  kibana:
+    depends_on:
+      es01:
+        condition: service_healthy
+    image: docker.elastic.co/kibana/kibana:${STACK_VERSION}
+    volumes:
+      - certs:/usr/share/kibana/config/certs
+      - kibanadata:/usr/share/kibana/data
+      - ./configurations/elastic/fleet-configuration.yaml:/usr/share/kibana/config/kibana.yml
+    ports:
+      - ${KIBANA_PORT}:5601
+    networks:
+      - elastic
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.kibana.rule=Host(`${KIBANA_DOMAIN_NAME}`)"
+      - "traefik.http.routers.kibana.entrypoints=websecure"
+      - "traefik.http.routers.kibana.tls=true"
+      - "traefik.http.routers.kibana.tls.certresolver=${CERT_RESOLVER:-}"
+      - "traefik.http.services.kibana.loadbalancer.server.port=5601"
+      - "traefik.http.services.kibana.loadbalancer.server.scheme=https"
+      # Reference serversTransport from file provider for TLS verification
+      - "traefik.http.services.kibana.loadbalancer.serversTransport=kibana-transport@file"
+    environment:
+      SERVERNAME: kibana
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PUBLICBASEURL: https://${KIBANA_DOMAIN_NAME}:443
+      SERVER_SHUTDOWNTIMEOUT: "5s"
+      ELASTICSEARCH_HOSTS: https://es01:9200
+      ELASTICSEARCH_USERNAME: kibana_system
+      ELASTICSEARCH_PASSWORD: ${KIBANA_PASSWORD}
+      ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES: config/certs/ca/ca.crt
+      SERVER_SSL_CERTIFICATE: config/certs/kibana/kibana.crt
+      SERVER_SSL_KEY: config/certs/kibana/kibana.key
+      SERVER_SSL_ENABLED: true
+      XPACK_SECURITY_ENCRYPTIONKEY: ${KB_SECURITY_ENCRYPTIONKEY}
+      XPACK_REPORTING_ENCRYPTIONKEY: ${KB_REPORTING_ENCRYPTIONKEY}
+      XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY: ${KB_OBJECTS_ENCRYPTIONKEY}
+      ES_DOMAIN_NAME: ${ES_DOMAIN_NAME}
+      FLEET_DOMAIN_NAME: ${FLEET_DOMAIN_NAME}
+      APM_DOMAIN_NAME: ${APM_DOMAIN_NAME}
+      APM_SECRET_TOKEN: ${APM_SECRET_TOKEN}
+    mem_limit: ${KB_MEM_LIMIT}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s --cacert config/certs/ca/ca.crt -I https://localhost:5601 | grep -q 'HTTP/2 302'",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 120
+
+volumes:
+  kibanadata:
+    driver: local

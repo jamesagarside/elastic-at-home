@@ -1,0 +1,21 @@
+#################################################
+# Main compose file including shared resrouces. #
+#################################################
+
+# Services are split in to separate files to make
+# make readability and management easier.
+#
+# The include block tells docker compose which files
+# to merge together for our service stack.
+include:
+  - docker-compose.1.traefik.yaml
+  - docker-compose.2.setup.yaml
+  - docker-compose.3.elasticsearch.yaml
+  - docker-compose.4.kibana.yaml
+  - docker-compose.5.fleet.yaml
+  - docker-compose.6.agent.yaml
+
+# The shared docker network all our servers will use
+networks:
+  elastic:
+    driver: bridge

@@ -1,0 +1,128 @@
+# This file holds the fleet configuration which gets
+# applied when first starting the Fleet app within Kibana.
+#
+# The inital configuration is applied here to save manually
+# adding the required settings post start allowing for a 
+# fully hands off deployemnt of the Elastic Stack.
+
+# Tells Fleet which Integration Policies to pre-download
+xpack.fleet.packages:
+  - name: system
+    version: latest
+  - name: elastic_agent
+    version: latest
+  - name: apm
+    version: latest
+  - name: fleet_server
+    version: latest
+  - name: tcp
+    version: latest
+  - name: udp
+    version: latest
+
+# Agent Policy applied to the Fleet Server
+xpack.fleet.agentPolicies:
+  - name: Fleet Server Policy
+    id: fleet-server-policy
+    namespace: default
+    is_managed: false
+    # Perpolicy output and fleet assignment is a Platinum feature
+    # data_output_id: es-containerhost
+    # monitoring_output_id: es-containerhost
+    # fleet_server_host_id: fleet-internal-fleet-server-host
+    unenroll_timeout: 86400
+    inactivity_timeout: 900
+    monitoring_enabled:
+      - logs
+      - metrics
+      - traces
+    package_policies:
+      - package:
+          name: fleet_server
+        name: Fleet Server
+        id: fleet-server
+      - package:
+          name: apm
+        name: Elastic APM
+        id: apm
+        inputs:
+          - type: apm
+            enabled: true
+            vars:
+              - name: host
+                value: "localhost:8200"
+              - name: url
+                value: "https://${APM_DOMAIN_NAME}:443"
+              - name: secret_token
+                value: "${APM_SECRET_TOKEN}"
+              - name: api_key_enabled
+                value: true
+              - name: tls_enabled
+                value: true
+              - name: tls_certificate
+                value: "/certs/apm/apm.crt"
+              - name: tls_key
+                value: "/certs/apm/apm.key"
+              - name: tls_supported_protocols
+                value:
+                  - "TLSv1.2"
+                  - "TLSv1.3"
+  - name: SIEM Agent Policy
+    id: siem-agent-policy
+    namespace: default
+    is_managed: false
+    # Perpolicy output and fleet assignment is a Platinum feature
+    # data_output_id: es-containerhost
+    # monitoring_output_id: es-containerhost
+    # fleet_server_host_id: fleet-internal-fleet-server-host
+    unenroll_timeout: 86400
+    inactivity_timeout: 900
+    monitoring_enabled:
+      - logs
+      - metrics
+      - traces
+    package_policies:
+      - package:
+          name: system
+        name: Siem Agent System
+        id: siem-agent-system
+      # TCP/UDP input settings are configured via Fleet API in setup container
+      # because preconfiguration doesn't support input-type package variables
+      - package:
+          name: tcp
+        name: Siem Agent Syslog TCP
+        id: siem-agent-syslog-tcp
+      - package:
+          name: udp
+        name: Siem Agent Syslog UDP
+        id: siem-agent-syslog-udp
+
+# Output settings used by Fleet when configuring Agents
+# Without these Agents wouldnt know where to send data
+xpack.fleet.outputs:
+  - id: es-containerhost
+    name: Docker internal output
+    type: elasticsearch
+    hosts: ["https://es01:9200"]
+    config:
+      ssl:
+        certificate_authorities: ["/certs/ca/ca.crt"]
+  - id: es-external
+    name: External Elasticsearch Output
+    type: elasticsearch
+    hosts: ["https://${ES_DOMAIN_NAME}:443"]
+    is_default: true
+    is_default_monitoring: true
+    # Uses Let's Encrypt - publicly trusted, no custom CA needed
+
+# Fleet Server settings used by Fleet when configuring Agents
+# Without these Agents wouldnt know how to connect to Fleet Server
+xpack.fleet.fleetServerHosts:
+  - id: fleet-internal-fleet-server-host
+    name: Internal Docker Fleet Server Host
+    host_urls: ["https://fleet-server:8220"]
+    is_internal: true
+  - id: fleet-external-fleet-server-host
+    name: External Fleet Server Host
+    host_urls: ["https://${FLEET_DOMAIN_NAME}:443"]
+    is_default: true

@@ -1,0 +1,134 @@
+name: Render Architecture Diagram
+
+on:
+  push:
+    paths:
+      - ".github/workflows/render-architecture.yml"
+      - "workspace.dsl"
+      - "icons/**"
+    branches:
+      - main
+      - development
+  pull_request:
+    paths:
+      - "workspace.dsl"
+      - "icons/**"
+  workflow_dispatch:
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create output directory
+        run: mkdir -p images/architecture
+
+      - name: Start Structurizr Lite
+        run: |
+          docker pull structurizr/lite
+          docker run \
+            -d \
+            --name structurizr \
+            -p 8080:8080 \
+            -v ${{ github.workspace }}:/usr/local/structurizr \
+            structurizr/lite
+
+          # Wait for Structurizr to start
+          echo "Waiting for Structurizr Lite to start..."
+          for i in {1..30}; do
+            if curl -s http://localhost:8080 > /dev/null 2>&1; then
+              echo "Structurizr Lite is ready!"
+              break
+            fi
+            echo "Attempt $i/30..."
+            sleep 2
+          done
+
+      - name: Install Inter font
+        run: |
+          mkdir -p ~/.fonts
+          curl -sL "https://github.com/rsms/inter/releases/download/v4.0/Inter-4.0.zip" -o /tmp/inter.zip
+          unzip -q /tmp/inter.zip -d /tmp/inter
+          cp /tmp/inter/extras/ttf/*.ttf ~/.fonts/
+          fc-cache -fv
+          echo "Inter font installed"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Puppeteer and export diagrams
+        run: |
+          cd images/architecture
+          npm init -y
+          npm install puppeteer
+
+          # Download the official Structurizr export script
+          curl -sL https://raw.githubusercontent.com/structurizr/puppeteer/master/export-diagrams.js -o export-diagrams.js
+
+          # Verify download
+          if head -1 export-diagrams.js | grep -q "404"; then
+            echo "ERROR: Failed to download export script"
+            exit 1
+          fi
+
+          # Patch for GitHub Actions: add --no-sandbox flag for headless Chrome
+          sed -i "s/puppeteer.launch({/puppeteer.launch({args: ['--no-sandbox', '--disable-setuid-sandbox'], /" export-diagrams.js
+
+          # Patch: wait for fonts to load (networkidle0 waits for all network requests)
+          sed -i "s/waitUntil: 'domcontentloaded'/waitUntil: 'networkidle0'/" export-diagrams.js
+
+          echo "Rendering diagrams..."
+          node export-diagrams.js http://localhost:8080/workspace/diagrams png
+
+          echo "=== Generated files ==="
+          ls -la
+
+      - name: Cleanup and rename files
+        run: |
+          cd images/architecture
+
+          # Remove key files and node modules
+          rm -f *-key.png
+          rm -rf node_modules package.json package-lock.json export-diagrams.js
+
+          # Rename to clean filenames
+          for f in *.png; do
+            if [[ -f "$f" ]]; then
+              newname=$(echo "$f" | sed 's/structurizr-//g' | tr '[:upper:]' '[:lower:]')
+              if [[ "$f" != "$newname" ]]; then
+                mv "$f" "$newname"
+                echo "Renamed: $f -> $newname"
+              fi
+            fi
+          done
+
+          echo "=== Final files ==="
+          ls -la
+
+      - name: Stop Structurizr Lite
+        if: always()
+        run: docker stop structurizr || true
+
+      - name: Verify output
+        run: |
+          if [[ ! -f "images/architecture/architecture.png" ]]; then
+            echo "ERROR: architecture.png was not generated!"
+            ls -la images/architecture/
+            exit 1
+          fi
+          echo "Success: architecture.png exists"
+          file images/architecture/architecture.png
+
+      - name: Commit rendered diagrams
+        if: github.event_name == 'push'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "docs: update architecture diagram [skip ci]"
+          file_pattern: "images/architecture/*.png"
