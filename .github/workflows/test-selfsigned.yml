@@ -1,0 +1,315 @@
+name: Test Self-Signed Deployment
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docker-compose*.yaml'
+      - 'docker-compose*.yml'
+      - 'configurations/**'
+      - '.env.example'
+      - '.github/workflows/test-selfsigned.yml'
+      - '.github/scripts/test-stack.sh'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docker-compose*.yaml'
+      - 'docker-compose*.yml'
+      - 'configurations/**'
+      - '.env.example'
+      - '.github/workflows/test-selfsigned.yml'
+      - '.github/scripts/test-stack.sh'
+  workflow_dispatch:
+    inputs:
+      stack_version:
+        description: 'Elastic Stack version to test'
+        required: false
+        default: '9.2.2'
+      debug:
+        description: 'Enable debug output'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  # Default stack version (can be overridden by workflow_dispatch)
+  STACK_VERSION: ${{ github.event.inputs.stack_version || '9.2.2' }}
+
+jobs:
+  test-selfsigned:
+    name: Self-Signed Certificate Mode
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create .env file
+        run: |
+          cat > .env << 'EOF'
+          # Certificate Mode: empty for self-signed
+          CERT_RESOLVER=
+
+          # ACME settings (not used in self-signed mode)
+          ACME_EMAIL=test@example.com
+          CF_DNS_API_TOKEN=
+
+          # Security credentials
+          ELASTIC_PASSWORD=TestPassword123!
+          KIBANA_PASSWORD=TestPassword123!
+          APM_SECRET_TOKEN=TestAPMToken123!
+
+          # Stack version
+          STACK_VERSION=${{ env.STACK_VERSION }}
+
+          # Cluster settings
+          CLUSTER_NAME=test-cluster
+          LICENSE=basic
+
+          # Domain names (using localhost for testing)
+          KIBANA_DOMAIN_NAME=localhost
+          ES_DOMAIN_NAME=localhost
+          FLEET_DOMAIN_NAME=localhost
+          APM_DOMAIN_NAME=localhost
+          AGENT_DOMAIN_NAME=localhost
+          TRAEFIK_DOMAIN_NAME=localhost
+
+          # Port mappings (bind to localhost)
+          ES_PORT=127.0.0.1:9200
+          KIBANA_PORT=127.0.0.1:5601
+          FLEET_PORT=127.0.0.1:8220
+          AGENT_PORT=127.0.0.1:5514
+
+          # Allowed syslog IPs
+          ALLOWED_SYSLOG_IPS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+
+          # Memory limits (reduced for CI)
+          KB_MEM_LIMIT=1073741824
+          ES_MEM_LIMIT=2147483648
+          FLEET_MEM_LIMIT=1073741824
+          AGENT_MEM_LIMIT=1073741824
+
+          # Kibana encryption keys
+          KB_SECURITY_ENCRYPTIONKEY=fRDzAmciu0Sv3c0S8lKxJMrxJbEoEKG1
+          KB_REPORTING_ENCRYPTIONKEY=Ih2qXq9iuXdiXg1jo4yXZV8gJWc6stzH
+          KB_OBJECTS_ENCRYPTIONKEY=ny6tYXoI3lYrRcpgMSMQAkrSBen8dE9K
+          EOF
+
+      - name: Increase vm.max_map_count for Elasticsearch
+        run: |
+          sudo sysctl -w vm.max_map_count=262144
+
+      - name: Start Elastic Stack
+        run: |
+          echo "Starting Elastic Stack with self-signed certificates..."
+          docker compose up -d
+          echo "Stack started, waiting for services to initialize..."
+
+      - name: Wait for Setup container to complete
+        run: |
+          echo "Waiting for setup container to complete certificate generation..."
+          timeout 300 bash -c '
+            while true; do
+              status=$(docker compose ps setup --format json 2>/dev/null | jq -r ".State" 2>/dev/null || echo "running")
+              if [[ "$status" == "exited" ]]; then
+                exit_code=$(docker compose ps setup --format json 2>/dev/null | jq -r ".ExitCode" 2>/dev/null || echo "1")
+                if [[ "$exit_code" == "0" ]]; then
+                  echo "Setup completed successfully"
+                  exit 0
+                else
+                  echo "Setup failed with exit code $exit_code"
+                  docker compose logs setup
+                  exit 1
+                fi
+              fi
+              echo "Setup container status: $status"
+              sleep 10
+            done
+          '
+
+      - name: Wait for Elasticsearch to be healthy
+        run: |
+          echo "Waiting for Elasticsearch to be healthy..."
+          timeout 300 bash -c '
+            while true; do
+              health=$(docker compose ps es01 --format json 2>/dev/null | jq -r ".Health" 2>/dev/null || echo "starting")
+              echo "Elasticsearch health: $health"
+              if [[ "$health" == "healthy" ]]; then
+                echo "Elasticsearch is healthy"
+                exit 0
+              fi
+              sleep 10
+            done
+          '
+
+      - name: Wait for Kibana to be healthy
+        run: |
+          echo "Waiting for Kibana to be healthy..."
+          timeout 300 bash -c '
+            while true; do
+              health=$(docker compose ps kibana --format json 2>/dev/null | jq -r ".Health" 2>/dev/null || echo "starting")
+              echo "Kibana health: $health"
+              if [[ "$health" == "healthy" ]]; then
+                echo "Kibana is healthy"
+                exit 0
+              fi
+              sleep 10
+            done
+          '
+
+      - name: Wait for Fleet Server to be healthy
+        run: |
+          echo "Waiting for Fleet Server to be healthy..."
+          timeout 300 bash -c '
+            while true; do
+              health=$(docker compose ps fleet-server --format json 2>/dev/null | jq -r ".Health" 2>/dev/null || echo "starting")
+              echo "Fleet Server health: $health"
+              if [[ "$health" == "healthy" ]]; then
+                echo "Fleet Server is healthy"
+                exit 0
+              fi
+              sleep 10
+            done
+          '
+
+      - name: Wait for Agent to be running
+        run: |
+          echo "Waiting for Elastic Agent..."
+          sleep 30  # Give agent time to enroll
+
+      - name: Show running containers
+        run: |
+          docker compose ps -a
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq openssl
+
+      - name: Extract CA certificate
+        run: |
+          # Copy CA cert from the certs volume
+          docker compose cp setup:/usr/share/elasticsearch/config/certs/ca/ca.crt ./ca.crt
+          echo "CA Certificate extracted:"
+          openssl x509 -in ./ca.crt -noout -subject -dates
+
+      - name: Run certificate tests
+        id: cert_tests
+        run: |
+          export ELASTICSEARCH_URL="https://localhost:9200"
+          export KIBANA_URL="https://localhost:5601"
+          export FLEET_URL="https://localhost:8220"
+          export ELASTIC_PASSWORD="TestPassword123!"
+          export CA_CERT="./ca.crt"
+          export CERT_RESOLVER=""
+
+          bash .github/scripts/test-stack.sh certificates
+        continue-on-error: true
+
+      - name: Run Elasticsearch tests
+        id: es_tests
+        run: |
+          export ELASTICSEARCH_URL="https://localhost:9200"
+          export KIBANA_URL="https://localhost:5601"
+          export FLEET_URL="https://localhost:8220"
+          export ELASTIC_PASSWORD="TestPassword123!"
+          export CA_CERT="./ca.crt"
+
+          bash .github/scripts/test-stack.sh elasticsearch
+        continue-on-error: true
+
+      - name: Run Kibana tests
+        id: kibana_tests
+        run: |
+          export ELASTICSEARCH_URL="https://localhost:9200"
+          export KIBANA_URL="https://localhost:5601"
+          export FLEET_URL="https://localhost:8220"
+          export ELASTIC_PASSWORD="TestPassword123!"
+          export CA_CERT="./ca.crt"
+
+          bash .github/scripts/test-stack.sh kibana
+        continue-on-error: true
+
+      - name: Run Fleet tests
+        id: fleet_tests
+        run: |
+          export ELASTICSEARCH_URL="https://localhost:9200"
+          export KIBANA_URL="https://localhost:5601"
+          export FLEET_URL="https://localhost:8220"
+          export ELASTIC_PASSWORD="TestPassword123!"
+          export CA_CERT="./ca.crt"
+
+          bash .github/scripts/test-stack.sh fleet
+        continue-on-error: true
+
+      - name: Run Agent tests
+        id: agent_tests
+        run: |
+          export ELASTICSEARCH_URL="https://localhost:9200"
+          export KIBANA_URL="https://localhost:5601"
+          export FLEET_URL="https://localhost:8220"
+          export ELASTIC_PASSWORD="TestPassword123!"
+          export CA_CERT="./ca.crt"
+
+          bash .github/scripts/test-stack.sh agent
+        continue-on-error: true
+
+      - name: Run full test suite
+        id: full_tests
+        run: |
+          export ELASTICSEARCH_URL="https://localhost:9200"
+          export KIBANA_URL="https://localhost:5601"
+          export FLEET_URL="https://localhost:8220"
+          export ELASTIC_PASSWORD="TestPassword123!"
+          export CA_CERT="./ca.crt"
+
+          bash .github/scripts/test-stack.sh all
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== Docker Compose Logs ==="
+          docker compose logs --tail=100
+
+          echo ""
+          echo "=== Container Status ==="
+          docker compose ps -a
+
+          echo ""
+          echo "=== Traefik Logs ==="
+          docker compose logs traefik --tail=50
+
+          echo ""
+          echo "=== Elasticsearch Logs ==="
+          docker compose logs es01 --tail=50
+
+          echo ""
+          echo "=== Kibana Logs ==="
+          docker compose logs kibana --tail=50
+
+          echo ""
+          echo "=== Fleet Server Logs ==="
+          docker compose logs fleet-server --tail=50
+
+          echo ""
+          echo "=== Agent Logs ==="
+          docker compose logs agent --tail=50
+
+      - name: Upload logs artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-logs-selfsigned
+          path: |
+            docker-compose-logs.txt
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose down -v --remove-orphans
+          docker system prune -f
