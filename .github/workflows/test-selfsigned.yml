@@ -52,7 +52,7 @@ jobs:
         run: |
           cat > .env << 'EOF'
           # Certificate Mode: empty for self-signed
-          CERT_RESOLVER=
+          INGRESS_MODE=selfsigned
 
           # ACME settings (not used in self-signed mode)
           ACME_EMAIL=test@example.com
@@ -210,7 +210,7 @@ jobs:
           export FLEET_URL="https://localhost:8220"
           export ELASTIC_PASSWORD="TestPassword123!"
           export CA_CERT="./ca.crt"
-          export CERT_RESOLVER=""
+          export INGRESS_MODE="selfsigned"
 
           bash .github/scripts/test-stack.sh certificates
         continue-on-error: true

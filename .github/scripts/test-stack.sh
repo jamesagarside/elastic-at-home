@@ -146,7 +146,7 @@ test_ca_certificate_exists() {
         return 0
     else
         # For Let's Encrypt mode, CA cert is not required
-        if [[ "${CERT_RESOLVER:-}" == "letsencrypt" ]]; then
+        if [[ "${INGRESS_MODE:-}" == "letsencrypt" ]]; then
             record_pass "Let's Encrypt mode - no local CA required"
             return 0
         fi
@@ -159,7 +159,7 @@ test_ca_certificate_valid() {
     log_test_start "CA Certificate Valid"
 
     if [[ ! -f "$CA_CERT" ]]; then
-        if [[ "${CERT_RESOLVER:-}" == "letsencrypt" ]]; then
+        if [[ "${INGRESS_MODE:-}" == "letsencrypt" ]]; then
             record_skip "Let's Encrypt mode - no local CA to validate"
             return 0
         fi
@@ -186,7 +186,7 @@ test_service_certificate() {
     log_test_start "Service Certificate: $service"
 
     if [[ ! -f "$cert_path" ]]; then
-        if [[ "${CERT_RESOLVER:-}" == "letsencrypt" ]]; then
+        if [[ "${INGRESS_MODE:-}" == "letsencrypt" ]]; then
             record_skip "Let's Encrypt mode - service certs managed externally"
             return 0
         fi
@@ -681,7 +681,7 @@ main() {
     echo -e "Elasticsearch URL: $ELASTICSEARCH_URL"
     echo -e "Kibana URL:        $KIBANA_URL"
     echo -e "Fleet URL:         $FLEET_URL"
-    echo -e "Certificate Mode:  ${CERT_RESOLVER:-self-signed}"
+    echo -e "Certificate Mode:  ${INGRESS_MODE:-self-signed}"
     echo -e "CA Certificate:    ${CA_CERT:-none}"
 
     case "$test_suite" in

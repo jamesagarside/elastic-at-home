@@ -7,8 +7,6 @@ services:
     volumes:
       - certs:/usr/share/elasticsearch/config/certs
       - esdata01:/usr/share/elasticsearch/data
-    ports:
-      - ${ES_PORT}:9200
     networks:
       - elastic
     environment:
@@ -34,7 +32,7 @@ services:
       - "traefik.http.routers.es.rule=Host(`${ES_DOMAIN_NAME}`)"
       - "traefik.http.routers.es.entrypoints=websecure"
       - "traefik.http.routers.es.tls=true"
-      - "traefik.http.routers.es.tls.certresolver=${CERT_RESOLVER:-}"
+      - "traefik.http.routers.es.tls.certresolver=${INGRESS_MODE:-}"
       - "traefik.http.services.es.loadbalancer.server.port=9200"
       - "traefik.http.services.es.loadbalancer.server.scheme=https"
       # Reference serversTransport from file provider for TLS verification

@@ -8,8 +8,6 @@ services:
     volumes:
       - certs:/certs
       - fleetserverdata:/usr/share/elastic-agent
-    ports:
-      - ${FLEET_PORT}:8220
     networks:
       - elastic
     user: root
@@ -40,7 +38,7 @@ services:
       - "traefik.http.routers.fleet.rule=Host(`${FLEET_DOMAIN_NAME}`)"
       - "traefik.http.routers.fleet.entrypoints=websecure"
       - "traefik.http.routers.fleet.tls=true"
-      - "traefik.http.routers.fleet.tls.certresolver=${CERT_RESOLVER:-}"
+      - "traefik.http.routers.fleet.tls.certresolver=${INGRESS_MODE:-}"
       - "traefik.http.services.fleet.loadbalancer.server.port=8220"
       - "traefik.http.services.fleet.loadbalancer.server.scheme=https"
       # Reference serversTransport from file provider for TLS verification

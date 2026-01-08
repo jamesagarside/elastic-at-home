@@ -9,7 +9,7 @@
 # - Browser users click "proceed to site" to accept the certificate
 # - Agents can trust the CA for secure enrollment
 #
-# When CERT_RESOLVER=letsencrypt, ACME fetches certs and this is ignored.
+# When INGRESS_MODE=letsencrypt, ACME fetches certs and this is ignored.
 
 # TLS Configuration - Default certificate for all services
 tls:

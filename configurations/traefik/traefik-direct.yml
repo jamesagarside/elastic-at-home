@@ -1,0 +1,58 @@
+# Traefik Static Configuration - Direct Access Mode
+#
+# This configuration provides port-based routing for IP access.
+# Access services directly via host IP and service-specific ports:
+#   - Elasticsearch: https://<host-ip>:9200
+#   - Kibana:        https://<host-ip>:5601
+#   - Fleet Server:  https://<host-ip>:8220
+#   - APM Server:    https://<host-ip>:8200
+#
+# Browser Access:
+#   Click "proceed to site" when prompted about the untrusted certificate.
+#
+# Agent Enrollment:
+#   Agents connecting to Fleet/ES should trust the CA certificate:
+#   docker cp $(docker compose ps -q setup):/certs/ca/ca.crt ./ca.crt
+#
+# No DNS configuration required - works with IP addresses only.
+
+api:
+  insecure: true
+  dashboard: true
+
+ping: true
+
+accessLog:
+  format: json
+
+providers:
+  docker:
+    exposedByDefault: false
+  file:
+    filename: /etc/traefik/dynamic.yaml
+
+# Port-based entrypoints for direct IP access
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+  # Service-specific ports for direct access
+  elasticsearch:
+    address: ":9200"
+  kibana:
+    address: ":5601"
+  fleet:
+    address: ":8220"
+  apm:
+    address: ":8200"
+  # Syslog entrypoints
+  syslog-tcp:
+    address: ":514"
+  syslog-udp:
+    address: ":514/udp"

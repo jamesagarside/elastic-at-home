@@ -1,0 +1,89 @@
+# Traefik Dynamic Configuration - Direct Access Mode
+#
+# Port-based routing for IP access without DNS/hostnames.
+# Each service is accessible on its dedicated port.
+
+# TLS Configuration - Default certificate for all services
+tls:
+  certificates:
+    # ES CA-signed cert for TLS termination
+    - certFile: /certs/traefik/traefik.crt
+      keyFile: /certs/traefik/traefik.key
+
+http:
+  # Routers - port-based routing to backend services
+  routers:
+    # Elasticsearch on port 9200
+    es-direct:
+      rule: "PathPrefix(`/`)"
+      entryPoints:
+        - elasticsearch
+      service: es-service
+      tls: {}
+
+    # Kibana on port 5601
+    kibana-direct:
+      rule: "PathPrefix(`/`)"
+      entryPoints:
+        - kibana
+      service: kibana-service
+      tls: {}
+
+    # Fleet Server on port 8220
+    fleet-direct:
+      rule: "PathPrefix(`/`)"
+      entryPoints:
+        - fleet
+      service: fleet-service
+      tls: {}
+
+    # APM Server on port 8200
+    apm-direct:
+      rule: "PathPrefix(`/`)"
+      entryPoints:
+        - apm
+      service: apm-service
+      tls: {}
+
+  # Services - backend definitions
+  services:
+    es-service:
+      loadBalancer:
+        servers:
+          - url: "https://es01:9200"
+        serversTransport: es-transport
+
+    kibana-service:
+      loadBalancer:
+        servers:
+          - url: "https://kibana:5601"
+        serversTransport: kibana-transport
+
+    fleet-service:
+      loadBalancer:
+        servers:
+          - url: "https://fleet-server:8220"
+        serversTransport: fleet-transport
+
+    apm-service:
+      loadBalancer:
+        servers:
+          - url: "https://fleet-server:8200"
+        serversTransport: fleet-transport
+
+  # ServersTransports for backend TLS verification
+  serversTransports:
+    es-transport:
+      serverName: "es01"
+      rootCAs:
+        - /certs/ca/ca.crt
+
+    kibana-transport:
+      serverName: "kibana"
+      rootCAs:
+        - /certs/ca/ca.crt
+
+    fleet-transport:
+      serverName: "fleet-server"
+      rootCAs:
+        - /certs/ca/ca.crt

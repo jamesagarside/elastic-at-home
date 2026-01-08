@@ -117,7 +117,7 @@ jobs:
 
           cat > .env << EOF
           # Certificate Mode: letsencrypt for publicly trusted certs
-          CERT_RESOLVER=letsencrypt
+          INGRESS_MODE=letsencrypt
 
           # ACME settings
           ACME_EMAIL=${{ secrets.ACME_EMAIL || vars.ACME_EMAIL || 'test@example.com' }}
@@ -323,7 +323,7 @@ jobs:
           export KIBANA_URL="https://${{ steps.domains.outputs.kibana_domain }}"
           export FLEET_URL="https://${{ steps.domains.outputs.fleet_domain }}"
           export ELASTIC_PASSWORD="TestPassword123!"
-          export CERT_RESOLVER="letsencrypt"
+          export INGRESS_MODE="letsencrypt"
           # No CA_CERT needed for Let's Encrypt
 
           bash .github/scripts/test-stack.sh certificates
@@ -336,7 +336,7 @@ jobs:
           export KIBANA_URL="https://${{ steps.domains.outputs.kibana_domain }}"
           export FLEET_URL="https://${{ steps.domains.outputs.fleet_domain }}"
           export ELASTIC_PASSWORD="TestPassword123!"
-          export CERT_RESOLVER="letsencrypt"
+          export INGRESS_MODE="letsencrypt"
 
           bash .github/scripts/test-stack.sh elasticsearch
         continue-on-error: true
@@ -348,7 +348,7 @@ jobs:
           export KIBANA_URL="https://${{ steps.domains.outputs.kibana_domain }}"
           export FLEET_URL="https://${{ steps.domains.outputs.fleet_domain }}"
           export ELASTIC_PASSWORD="TestPassword123!"
-          export CERT_RESOLVER="letsencrypt"
+          export INGRESS_MODE="letsencrypt"
 
           bash .github/scripts/test-stack.sh kibana
         continue-on-error: true
@@ -360,7 +360,7 @@ jobs:
           export KIBANA_URL="https://${{ steps.domains.outputs.kibana_domain }}"
           export FLEET_URL="https://${{ steps.domains.outputs.fleet_domain }}"
           export ELASTIC_PASSWORD="TestPassword123!"
-          export CERT_RESOLVER="letsencrypt"
+          export INGRESS_MODE="letsencrypt"
 
           bash .github/scripts/test-stack.sh fleet
         continue-on-error: true
@@ -372,7 +372,7 @@ jobs:
           export KIBANA_URL="https://${{ steps.domains.outputs.kibana_domain }}"
           export FLEET_URL="https://${{ steps.domains.outputs.fleet_domain }}"
           export ELASTIC_PASSWORD="TestPassword123!"
-          export CERT_RESOLVER="letsencrypt"
+          export INGRESS_MODE="letsencrypt"
 
           bash .github/scripts/test-stack.sh agent
         continue-on-error: true
@@ -384,7 +384,7 @@ jobs:
           export KIBANA_URL="https://${{ steps.domains.outputs.kibana_domain }}"
           export FLEET_URL="https://${{ steps.domains.outputs.fleet_domain }}"
           export ELASTIC_PASSWORD="TestPassword123!"
-          export CERT_RESOLVER="letsencrypt"
+          export INGRESS_MODE="letsencrypt"
 
           bash .github/scripts/test-stack.sh all
 
