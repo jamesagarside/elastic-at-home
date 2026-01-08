@@ -240,11 +240,12 @@ jobs:
           echo "Waiting for Elasticsearch to be healthy..."
           timeout 300 bash -c '
             while true; do
-              if docker compose ps es01 --status healthy 2>/dev/null | grep -q es01; then
+              health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-es01-1 2>/dev/null || echo "unknown")
+              echo "Elasticsearch health: $health"
+              if [[ "$health" == "healthy" ]]; then
                 echo "Elasticsearch is healthy"
                 exit 0
               fi
-              echo "Elasticsearch not healthy yet, waiting..."
               sleep 10
             done
           '
@@ -254,11 +255,12 @@ jobs:
           echo "Waiting for Kibana to be healthy..."
           timeout 300 bash -c '
             while true; do
-              if docker compose ps kibana --status healthy 2>/dev/null | grep -q kibana; then
+              health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-kibana-1 2>/dev/null || echo "unknown")
+              echo "Kibana health: $health"
+              if [[ "$health" == "healthy" ]]; then
                 echo "Kibana is healthy"
                 exit 0
               fi
-              echo "Kibana not healthy yet, waiting..."
               sleep 10
             done
           '
@@ -268,11 +270,12 @@ jobs:
           echo "Waiting for Fleet Server to be healthy..."
           timeout 300 bash -c '
             while true; do
-              if docker compose ps fleet-server --status healthy 2>/dev/null | grep -q fleet-server; then
+              health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-fleet-server-1 2>/dev/null || echo "unknown")
+              echo "Fleet Server health: $health"
+              if [[ "$health" == "healthy" ]]; then
                 echo "Fleet Server is healthy"
                 exit 0
               fi
-              echo "Fleet Server not healthy yet, waiting..."
               sleep 10
             done
           '
