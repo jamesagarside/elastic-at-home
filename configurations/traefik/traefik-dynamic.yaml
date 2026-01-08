@@ -1,19 +1,22 @@
 # Traefik Dynamic Configuration
 #
 # This file configures:
-# 1. Default TLS certificate for self-signed mode (uses ES-generated certs)
+# 1. Default TLS certificate for self-signed mode
 # 2. ServersTransports for backend TLS verification using certificate DNS names
 #
-# When CERT_RESOLVER is empty, Traefik uses the default certificate below.
+# Certificate Strategy (self-signed mode):
+# - All services use ES CA-signed cert with all domain SANs
+# - Browser users click "proceed to site" to accept the certificate
+# - Agents can trust the CA for secure enrollment
+#
 # When CERT_RESOLVER=letsencrypt, ACME fetches certs and this is ignored.
 
-# TLS Configuration - Default certificate for self-signed mode
+# TLS Configuration - Default certificate for all services
 tls:
-  stores:
-    default:
-      defaultCertificate:
-        certFile: /certs/traefik/traefik.crt
-        keyFile: /certs/traefik/traefik.key
+  certificates:
+    # ES CA-signed cert with all service domains as SANs
+    - certFile: /certs/traefik/traefik.crt
+      keyFile: /certs/traefik/traefik.key
 
 http:
   serversTransports:

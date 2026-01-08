@@ -36,11 +36,11 @@ What we'll cover in this Guide:
 
 Elastic at Home supports three certificate modes to accommodate different deployment scenarios—from fully air-gapped environments to internet-connected setups with publicly trusted certificates.
 
-| Mode                         | Use Case                    | Internet Required | Certificate Trust                     |
-| ---------------------------- | --------------------------- | ----------------- | ------------------------------------- |
-| **Let's Encrypt**            | Production, external agents | Yes (for ACME)    | Publicly trusted (automatic)          |
-| **Self-Signed with Traefik** | Air-gapped, internal only   | No                | ES-generated CA (manual distribution) |
-| **Direct Access**            | Development, testing        | No                | ES-generated CA (manual distribution) |
+| Mode                         | Use Case                    | Internet Required | Certificate Trust                              |
+| ---------------------------- | --------------------------- | ----------------- | ---------------------------------------------- |
+| **Let's Encrypt**            | Production, external agents | Yes (for ACME)    | Publicly trusted (automatic)                   |
+| **Self-Signed with Traefik** | Air-gapped, internal only   | No                | Browser: click through / Agents: CA trust      |
+| **Direct Access**            | Development, testing        | No                | ES-generated CA (manual import)                |
 
 #### Switching Between Modes
 
@@ -100,13 +100,23 @@ This mode uses Traefik as a reverse proxy with Let's Encrypt certificates obtain
 
 **Best for:** Air-gapped environments or internal networks where you control all clients.
 
-This mode uses Traefik as a reverse proxy but with the Elasticsearch-generated CA for TLS. Traefik properly validates backend service certificates using the internal CA (no `insecureSkipVerify`). Clients connecting through Traefik will need to trust the ES-generated CA.
+This mode uses Traefik as a reverse proxy with ES CA-signed certificates. All domain names are included as SANs (Subject Alternative Names) in a single certificate.
+
+Traefik properly validates backend service certificates using the internal CA (no `insecureSkipVerify`).
 
 **Requirements:**
 
-- Distribute `ca.crt` to all clients/agents
-- Configure clients to trust the CA
+- **Browser users:** Click "proceed to site" when prompted about the untrusted certificate. Use incognito/private browsing if you encounter cached certificate issues.
+- **Elastic Agents:** Distribute `ca.crt` and configure agents to trust the CA
 - No internet access required
+
+**Agent CA Certificate**
+
+For Elastic Agents connecting to Fleet/ES, extract and distribute the CA:
+
+```bash
+docker cp $(docker compose ps -q setup):/certs/ca/ca.crt ./ca.crt
+```
 
 #### Option 3: Direct Access (No Traefik)
 

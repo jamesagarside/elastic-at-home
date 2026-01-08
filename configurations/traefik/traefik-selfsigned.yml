@@ -1,13 +1,17 @@
 # Traefik Static Configuration - Self-Signed Mode
 #
-# This configuration uses Elasticsearch-generated certificates via Traefik.
-# No ACME/Let's Encrypt - works in air-gapped environments.
+# This configuration uses ES CA-signed certificates for all services.
+# All domain names are included as SANs in a single certificate.
 #
-# Usage: Copy this file to traefik.yml (or symlink it)
-#   cp traefik-selfsigned.yml traefik.yml
+# Browser Access:
+#   Click "proceed to site" when prompted about the untrusted certificate.
+#   Use incognito/private browsing if you encounter cached certificate issues.
 #
-# Clients will need to trust the CA certificate from:
+# Agent Enrollment:
+#   Agents connecting to Fleet/ES should trust the CA certificate:
 #   docker cp $(docker compose ps -q setup):/certs/ca/ca.crt ./ca.crt
+#
+# No ACME/Let's Encrypt - works in air-gapped environments.
 
 api:
   insecure: true
@@ -39,4 +43,4 @@ entryPoints:
   syslog-udp:
     address: ":514/udp"
 
-# No certificatesResolvers - uses default certificate from dynamic.yaml
+# No certificatesResolvers - uses certificates from dynamic.yaml
