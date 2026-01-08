@@ -114,19 +114,23 @@ jobs:
           echo "Waiting for setup container to complete certificate generation..."
           timeout 300 bash -c '
             while true; do
-              status=$(docker compose ps setup --format json 2>/dev/null | jq -r ".State" 2>/dev/null || echo "running")
-              if [[ "$status" == "exited" ]]; then
-                exit_code=$(docker compose ps setup --format json 2>/dev/null | jq -r ".ExitCode" 2>/dev/null || echo "1")
+              # Check if setup container has exited (not running)
+              if ! docker compose ps setup --status running 2>/dev/null | grep -q setup; then
+                # Container is not running, check exit code
+                exit_code=$(docker inspect --format="{{.State.ExitCode}}" elastic-at-home-setup-1 2>/dev/null || echo "unknown")
                 if [[ "$exit_code" == "0" ]]; then
                   echo "Setup completed successfully"
                   exit 0
+                elif [[ "$exit_code" == "unknown" ]]; then
+                  echo "Setup container not found yet, waiting..."
                 else
                   echo "Setup failed with exit code $exit_code"
                   docker compose logs setup
                   exit 1
                 fi
+              else
+                echo "Setup container still running..."
               fi
-              echo "Setup container status: $status"
               sleep 10
             done
           '
@@ -136,12 +140,11 @@ jobs:
           echo "Waiting for Elasticsearch to be healthy..."
           timeout 300 bash -c '
             while true; do
-              health=$(docker compose ps es01 --format json 2>/dev/null | jq -r ".Health" 2>/dev/null || echo "starting")
-              echo "Elasticsearch health: $health"
-              if [[ "$health" == "healthy" ]]; then
+              if docker compose ps es01 --status healthy 2>/dev/null | grep -q es01; then
                 echo "Elasticsearch is healthy"
                 exit 0
               fi
+              echo "Elasticsearch not healthy yet, waiting..."
               sleep 10
             done
           '
@@ -151,12 +154,11 @@ jobs:
           echo "Waiting for Kibana to be healthy..."
           timeout 300 bash -c '
             while true; do
-              health=$(docker compose ps kibana --format json 2>/dev/null | jq -r ".Health" 2>/dev/null || echo "starting")
-              echo "Kibana health: $health"
-              if [[ "$health" == "healthy" ]]; then
+              if docker compose ps kibana --status healthy 2>/dev/null | grep -q kibana; then
                 echo "Kibana is healthy"
                 exit 0
               fi
+              echo "Kibana not healthy yet, waiting..."
               sleep 10
             done
           '
@@ -166,12 +168,11 @@ jobs:
           echo "Waiting for Fleet Server to be healthy..."
           timeout 300 bash -c '
             while true; do
-              health=$(docker compose ps fleet-server --format json 2>/dev/null | jq -r ".Health" 2>/dev/null || echo "starting")
-              echo "Fleet Server health: $health"
-              if [[ "$health" == "healthy" ]]; then
+              if docker compose ps fleet-server --status healthy 2>/dev/null | grep -q fleet-server; then
                 echo "Fleet Server is healthy"
                 exit 0
               fi
+              echo "Fleet Server not healthy yet, waiting..."
               sleep 10
             done
           '
