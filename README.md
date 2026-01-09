@@ -159,6 +159,15 @@ Extract and distribute the CA for Elastic Agents:
 docker cp $(docker compose ps -q setup):/certs/ca/ca.crt ./ca.crt
 ```
 
+#### Expected Log Messages
+
+> [!NOTE]
+> In **selfsigned** and **direct** modes, you may see errors in the Traefik logs like:
+>
+> `ERR Router uses a nonexistent certificate resolver certificateResolver=selfsigned routerName=kibana@docker`
+>
+> **These errors are expected and can be safely ignored.** They occur because Docker labels reference a certificate resolver that only exists in Let's Encrypt mode. Traefik falls back to the TLS certificates configured in the dynamic config file.
+
 ---
 
 ### SSL/TLS using Let's Encrypt Certificates
