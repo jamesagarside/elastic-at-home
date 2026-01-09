@@ -5,32 +5,38 @@ services:
         condition: service_healthy
     image: traefik:v3.6.4
     container_name: traefik
-    # Static config auto-selected based on CERT_RESOLVER env var:
-    # - Empty/unset: traefik-selfsigned.yml (default)
-    # - "letsencrypt": traefik-letsencrypt.yml
+    # Static config auto-selected based on INGRESS_MODE env var:
+    # - "selfsigned": traefik-selfsigned.yml (hostname routing via 443)
+    # - "letsencrypt": traefik-letsencrypt.yml (hostname routing via 443)
+    # - "direct": traefik-direct.yml (port-based routing for IP access)
     ports:
       - "80:80"
       - "443:443"
       - "8080:8080"
       - "514:514/tcp"
       - "514:514/udp"
+      # Direct access ports (used when INGRESS_MODE=direct)
+      - "9200:9200"
+      - "5601:5601"
+      - "8220:8220"
+      - "8200:8200"
     environment:
       - CF_DNS_API_TOKEN=${CF_DNS_API_TOKEN}
-      # ACME email for Let's Encrypt (only used when CERT_RESOLVER=letsencrypt)
+      # ACME email for Let's Encrypt (only used when INGRESS_MODE=letsencrypt)
       - TRAEFIK_CERTIFICATESRESOLVERS_LETSENCRYPT_ACME_EMAIL=${ACME_EMAIL}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - letsencrypt:/letsencrypt
       - certs:/certs:ro
-      - ./configurations/traefik/traefik-${CERT_RESOLVER:-selfsigned}.yml:/etc/traefik/traefik.yml:ro
-      - ./configurations/traefik/traefik-dynamic.yaml:/etc/traefik/dynamic.yaml:ro
+      - ./configurations/traefik/traefik-${INGRESS_MODE:-selfsigned}.yml:/etc/traefik/traefik.yml:ro
+      - ./configurations/traefik/traefik-${INGRESS_MODE:-selfsigned}-dynamic.yaml:/etc/traefik/dynamic.yaml:ro
     networks:
       - elastic
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.dashboard.rule=Host(`${TRAEFIK_DOMAIN_NAME}`)"
       - "traefik.http.routers.dashboard.entrypoints=websecure"
-      - "traefik.http.routers.dashboard.tls.certresolver=${CERT_RESOLVER:-}"
+      - "traefik.http.routers.dashboard.tls.certresolver=${INGRESS_MODE:-}"
       - "traefik.http.routers.dashboard.service=api@internal"
     healthcheck:
       test: ["CMD-SHELL", "traefik healthcheck --ping"]

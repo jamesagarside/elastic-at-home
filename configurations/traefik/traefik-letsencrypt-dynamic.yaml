@@ -1,0 +1,28 @@
+# Traefik Dynamic Configuration - Let's Encrypt Mode
+#
+# This file configures:
+# 1. ServersTransports for backend TLS verification using certificate DNS names
+#
+# Note: TLS certificates are handled by ACME/Let's Encrypt in this mode,
+# so no default certificate is specified here.
+
+http:
+  serversTransports:
+    # Transport for Elasticsearch backend
+    es-transport:
+      serverName: "es01"
+      rootCAs:
+        - /certs/ca/ca.crt
+
+    # Transport for Kibana backend
+    kibana-transport:
+      serverName: "kibana"
+      rootCAs:
+        - /certs/ca/ca.crt
+
+    # Transport for Fleet Server backend (also serves APM)
+    # Both fleet and apm routes use this transport since they share the same backend
+    fleet-transport:
+      serverName: "fleet-server"
+      rootCAs:
+        - /certs/ca/ca.crt

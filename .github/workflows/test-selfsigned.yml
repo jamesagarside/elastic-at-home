@@ -1,0 +1,315 @@
+name: Test Self-Signed Deployment
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docker-compose*.yaml'
+      - 'docker-compose*.yml'
+      - 'configurations/**'
+      - '.env.example'
+      - '.github/workflows/test-selfsigned.yml'
+      - '.github/scripts/test-stack.sh'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docker-compose*.yaml'
+      - 'docker-compose*.yml'
+      - 'configurations/**'
+      - '.env.example'
+      - '.github/workflows/test-selfsigned.yml'
+      - '.github/scripts/test-stack.sh'
+  workflow_dispatch:
+    inputs:
+      stack_version:
+        description: 'Elastic Stack version to test'
+        required: false
+        default: '9.2.2'
+      debug:
+        description: 'Enable debug output'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  # Default stack version (can be overridden by workflow_dispatch)
+  STACK_VERSION: ${{ github.event.inputs.stack_version || '9.2.2' }}
+  # Test domain names for hostname-based routing
+  ES_DOMAIN: es.test.local
+  KIBANA_DOMAIN: kibana.test.local
+  FLEET_DOMAIN: fleet.test.local
+  APM_DOMAIN: apm.test.local
+  AGENT_DOMAIN: agent.test.local
+  TRAEFIK_DOMAIN: proxy.test.local
+
+jobs:
+  test-selfsigned:
+    name: Self-Signed Certificate Mode
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure /etc/hosts for hostname routing
+        run: |
+          # Add hostname entries for Traefik hostname-based routing
+          echo "Adding test domain entries to /etc/hosts..."
+          sudo tee -a /etc/hosts << EOF
+          127.0.0.1 ${{ env.ES_DOMAIN }}
+          127.0.0.1 ${{ env.KIBANA_DOMAIN }}
+          127.0.0.1 ${{ env.FLEET_DOMAIN }}
+          127.0.0.1 ${{ env.APM_DOMAIN }}
+          127.0.0.1 ${{ env.AGENT_DOMAIN }}
+          127.0.0.1 ${{ env.TRAEFIK_DOMAIN }}
+          EOF
+          echo "Hosts file updated:"
+          cat /etc/hosts | grep test.local
+
+      - name: Create .env file
+        run: |
+          cat > .env << EOF
+          # Ingress Mode: selfsigned for hostname routing with self-signed certs
+          INGRESS_MODE=selfsigned
+
+          # ACME settings (not used in self-signed mode)
+          ACME_EMAIL=test@example.com
+          CF_DNS_API_TOKEN=
+
+          # Security credentials
+          ELASTIC_PASSWORD=TestPassword123!
+          KIBANA_PASSWORD=TestPassword123!
+          APM_SECRET_TOKEN=TestAPMToken123!
+
+          # Stack version
+          STACK_VERSION=${{ env.STACK_VERSION }}
+
+          # Cluster settings
+          CLUSTER_NAME=test-cluster
+          LICENSE=basic
+
+          # Domain names for hostname-based routing via Traefik
+          ES_DOMAIN_NAME=${{ env.ES_DOMAIN }}
+          KIBANA_DOMAIN_NAME=${{ env.KIBANA_DOMAIN }}
+          FLEET_DOMAIN_NAME=${{ env.FLEET_DOMAIN }}
+          APM_DOMAIN_NAME=${{ env.APM_DOMAIN }}
+          AGENT_DOMAIN_NAME=${{ env.AGENT_DOMAIN }}
+          TRAEFIK_DOMAIN_NAME=${{ env.TRAEFIK_DOMAIN }}
+
+          # Allowed syslog IPs
+          ALLOWED_SYSLOG_IPS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+
+          # Memory limits (reduced for CI)
+          KB_MEM_LIMIT=1073741824
+          ES_MEM_LIMIT=2147483648
+          FLEET_MEM_LIMIT=1073741824
+          AGENT_MEM_LIMIT=1073741824
+
+          # Kibana encryption keys
+          KB_SECURITY_ENCRYPTIONKEY=fRDzAmciu0Sv3c0S8lKxJMrxJbEoEKG1
+          KB_REPORTING_ENCRYPTIONKEY=Ih2qXq9iuXdiXg1jo4yXZV8gJWc6stzH
+          KB_OBJECTS_ENCRYPTIONKEY=ny6tYXoI3lYrRcpgMSMQAkrSBen8dE9K
+          EOF
+
+      - name: Increase vm.max_map_count for Elasticsearch
+        run: |
+          sudo sysctl -w vm.max_map_count=262144
+
+      - name: Start Elastic Stack
+        run: |
+          echo "Starting Elastic Stack with self-signed certificates..."
+          docker compose up -d
+          echo "Stack started, waiting for services to initialize..."
+
+      - name: Wait for Setup container to complete
+        run: |
+          echo "Waiting for setup container to complete certificate generation..."
+          timeout 300 bash -c '
+            while true; do
+              # Check if setup container has exited (not running)
+              if ! docker compose ps setup --status running 2>/dev/null | grep -q setup; then
+                # Container is not running, check exit code
+                exit_code=$(docker inspect --format="{{.State.ExitCode}}" elastic-at-home-setup-1 2>/dev/null || echo "unknown")
+                if [[ "$exit_code" == "0" ]]; then
+                  echo "Setup completed successfully"
+                  exit 0
+                elif [[ "$exit_code" == "unknown" ]]; then
+                  echo "Setup container not found yet, waiting..."
+                else
+                  echo "Setup failed with exit code $exit_code"
+                  docker compose logs setup
+                  exit 1
+                fi
+              else
+                echo "Setup container still running..."
+              fi
+              sleep 10
+            done
+          '
+
+      - name: Wait for Elasticsearch to be healthy
+        run: |
+          echo "Waiting for Elasticsearch to be healthy..."
+          timeout 300 bash -c '
+            while true; do
+              # Check health via docker inspect
+              health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-es01-1 2>/dev/null || echo "unknown")
+              echo "Elasticsearch health: $health"
+              if [[ "$health" == "healthy" ]]; then
+                echo "Elasticsearch is healthy"
+                exit 0
+              fi
+              sleep 10
+            done
+          '
+
+      - name: Wait for Kibana to be healthy
+        run: |
+          echo "Waiting for Kibana to be healthy..."
+          timeout 300 bash -c '
+            while true; do
+              health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-kibana-1 2>/dev/null || echo "unknown")
+              echo "Kibana health: $health"
+              if [[ "$health" == "healthy" ]]; then
+                echo "Kibana is healthy"
+                exit 0
+              fi
+              sleep 10
+            done
+          '
+
+      - name: Wait for Fleet Server to be healthy
+        run: |
+          echo "Waiting for Fleet Server to be healthy..."
+          timeout 300 bash -c '
+            while true; do
+              health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-fleet-server-1 2>/dev/null || echo "unknown")
+              echo "Fleet Server health: $health"
+              if [[ "$health" == "healthy" ]]; then
+                echo "Fleet Server is healthy"
+                exit 0
+              fi
+              sleep 10
+            done
+          '
+
+      - name: Wait for Agent to be running
+        run: |
+          echo "Waiting for Elastic Agent..."
+          sleep 30  # Give agent time to enroll
+
+      - name: Show running containers
+        run: |
+          docker compose ps -a
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq openssl
+
+      - name: Extract CA certificate
+        run: |
+          # Copy CA cert from the certs volume
+          docker compose cp setup:/usr/share/elasticsearch/config/certs/ca/ca.crt ./ca.crt
+          echo "CA Certificate extracted:"
+          openssl x509 -in ./ca.crt -noout -subject -dates
+
+      - name: Verify hostname-based access via Traefik (port 443)
+        run: |
+          echo "Testing hostname-based routing through Traefik on port 443..."
+
+          # Test Elasticsearch via hostname
+          echo "Testing Elasticsearch at https://${{ env.ES_DOMAIN }}..."
+          ES_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --cacert ./ca.crt \
+            "https://${{ env.ES_DOMAIN }}" 2>/dev/null || echo "000")
+          echo "Elasticsearch status: $ES_STATUS"
+
+          # Test Kibana via hostname
+          echo "Testing Kibana at https://${{ env.KIBANA_DOMAIN }}..."
+          KB_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --cacert ./ca.crt \
+            "https://${{ env.KIBANA_DOMAIN }}" 2>/dev/null || echo "000")
+          echo "Kibana status: $KB_STATUS"
+
+          # Test Fleet via hostname
+          echo "Testing Fleet at https://${{ env.FLEET_DOMAIN }}/api/status..."
+          FLEET_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --cacert ./ca.crt \
+            "https://${{ env.FLEET_DOMAIN }}/api/status" 2>/dev/null || echo "000")
+          echo "Fleet status: $FLEET_STATUS"
+
+          echo "Hostname-based routing verification complete"
+
+      - name: Verify self-signed certificate details
+        run: |
+          echo "Verifying self-signed certificate is properly served..."
+
+          # Check certificate for each service
+          for domain in "${{ env.ES_DOMAIN }}" "${{ env.KIBANA_DOMAIN }}" "${{ env.FLEET_DOMAIN }}"; do
+            echo ""
+            echo "=== Certificate for $domain ==="
+            echo | openssl s_client -connect ${domain}:443 -servername ${domain} 2>/dev/null | \
+              openssl x509 -noout -issuer -subject -dates 2>/dev/null || echo "Could not retrieve certificate"
+          done
+
+      - name: Run full test suite
+        id: tests
+        run: |
+          # Use hostname-based URLs via Traefik port 443
+          export ELASTICSEARCH_URL="https://${{ env.ES_DOMAIN }}"
+          export KIBANA_URL="https://${{ env.KIBANA_DOMAIN }}"
+          export FLEET_URL="https://${{ env.FLEET_DOMAIN }}"
+          export ELASTIC_PASSWORD="TestPassword123!"
+          export CA_CERT="./ca.crt"
+          export INGRESS_MODE="selfsigned"
+          export DEBUG="${{ github.event.inputs.debug || 'false' }}"
+
+          # Run full test suite - includes certificates, elasticsearch, kibana, fleet, and agent tests
+          bash .github/scripts/test-stack.sh all
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== Docker Compose Logs ==="
+          docker compose logs --tail=100
+
+          echo ""
+          echo "=== Container Status ==="
+          docker compose ps -a
+
+          echo ""
+          echo "=== Traefik Logs ==="
+          docker compose logs traefik --tail=50
+
+          echo ""
+          echo "=== Elasticsearch Logs ==="
+          docker compose logs es01 --tail=50
+
+          echo ""
+          echo "=== Kibana Logs ==="
+          docker compose logs kibana --tail=50
+
+          echo ""
+          echo "=== Fleet Server Logs ==="
+          docker compose logs fleet-server --tail=50
+
+          echo ""
+          echo "=== Agent Logs ==="
+          docker compose logs agent --tail=50
+
+      - name: Upload logs artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-logs-selfsigned
+          path: |
+            docker-compose-logs.txt
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose down -v --remove-orphans
+          docker system prune -f

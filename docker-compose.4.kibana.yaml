@@ -8,8 +8,6 @@ services:
       - certs:/usr/share/kibana/config/certs
       - kibanadata:/usr/share/kibana/data
       - ./configurations/elastic/fleet-configuration.yaml:/usr/share/kibana/config/kibana.yml
-    ports:
-      - ${KIBANA_PORT}:5601
     networks:
       - elastic
     labels:
@@ -17,7 +15,7 @@ services:
       - "traefik.http.routers.kibana.rule=Host(`${KIBANA_DOMAIN_NAME}`)"
       - "traefik.http.routers.kibana.entrypoints=websecure"
       - "traefik.http.routers.kibana.tls=true"
-      - "traefik.http.routers.kibana.tls.certresolver=${CERT_RESOLVER:-}"
+      - "traefik.http.routers.kibana.tls.certresolver=${INGRESS_MODE:-}"
       - "traefik.http.services.kibana.loadbalancer.server.port=5601"
       - "traefik.http.services.kibana.loadbalancer.server.scheme=https"
       # Reference serversTransport from file provider for TLS verification

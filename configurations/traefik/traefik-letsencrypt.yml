@@ -4,11 +4,11 @@
 # for publicly trusted TLS certificates.
 #
 # Prerequisites (all set in .env file):
-# 1. CERT_RESOLVER=letsencrypt
+# 1. INGRESS_MODE=letsencrypt
 # 2. ACME_EMAIL=your-email@example.com
 # 3. CF_DNS_API_TOKEN=your-cloudflare-api-token
 #
-# This file is auto-selected when CERT_RESOLVER=letsencrypt
+# This file is auto-selected when INGRESS_MODE=letsencrypt
 
 api:
   insecure: true

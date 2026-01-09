@@ -36,28 +36,29 @@ What we'll cover in this Guide:
 
 Elastic at Home supports three certificate modes to accommodate different deployment scenarios—from fully air-gapped environments to internet-connected setups with publicly trusted certificates.
 
-| Mode                         | Use Case                    | Internet Required | Certificate Trust                     |
-| ---------------------------- | --------------------------- | ----------------- | ------------------------------------- |
-| **Let's Encrypt**            | Production, external agents | Yes (for ACME)    | Publicly trusted (automatic)          |
-| **Self-Signed with Traefik** | Air-gapped, internal only   | No                | ES-generated CA (manual distribution) |
-| **Direct Access**            | Development, testing        | No                | ES-generated CA (manual distribution) |
+| Mode                         | Use Case                    | Internet Required | Certificate Trust                              |
+| ---------------------------- | --------------------------- | ----------------- | ---------------------------------------------- |
+| **Let's Encrypt**            | Production, external agents | Yes (for ACME)    | Publicly trusted (automatic)                   |
+| **Self-Signed (Hostname)**   | Air-gapped, internal only   | No                | Browser: click through / Agents: CA trust      |
+| **Direct Access (IP:Port)**  | Development, testing        | No                | Browser: click through / Agents: CA trust      |
 
 #### Switching Between Modes
 
-Certificate mode is controlled by a single environment variable. The correct Traefik config file is automatically selected based on `CERT_RESOLVER`:
+Certificate mode is controlled by a single environment variable. The correct Traefik config file is automatically selected based on `INGRESS_MODE`:
 
-| CERT_RESOLVER value | Config file loaded |
-|---------------------|-------------------|
-| Empty (default) | `traefik-selfsigned.yml` |
-| `letsencrypt` | `traefik-letsencrypt.yml` |
+| INGRESS_MODE value  | Config file loaded         | Access Method         |
+| ------------------- | -------------------------- | --------------------- |
+| `selfsigned`        | `traefik-selfsigned.yml`   | Hostname via port 443 |
+| `letsencrypt`       | `traefik-letsencrypt.yml`  | Hostname via port 443 |
+| `direct`            | `traefik-direct.yml`       | IP via service ports  |
 
 **Self-Signed Mode (Default)**
 
 Self-signed mode works out of the box with no changes required:
 
 ```bash
-# .env file - leave CERT_RESOLVER empty
-CERT_RESOLVER=
+# .env file - default value
+INGRESS_MODE=selfsigned
 ```
 
 **Let's Encrypt Mode**
@@ -65,7 +66,7 @@ CERT_RESOLVER=
 To switch to Let's Encrypt with Cloudflare DNS challenge, update your `.env` file:
 
 ```bash
-CERT_RESOLVER=letsencrypt
+INGRESS_MODE=letsencrypt
 ACME_EMAIL=your-email@example.com
 CF_DNS_API_TOKEN=your-cloudflare-api-token
 ```
@@ -76,11 +77,26 @@ Then restart the stack:
 docker compose down && docker compose up -d
 ```
 
-**Switching Back to Self-Signed**
+##### Direct Access Mode
+
+For IP-based access without DNS configuration:
 
 ```bash
-# Edit .env: set CERT_RESOLVER to empty
-CERT_RESOLVER=
+INGRESS_MODE=direct
+```
+
+Access services via IP and port:
+
+- Kibana: `https://<host-ip>:5601`
+- Elasticsearch: `https://<host-ip>:9200`
+- Fleet Server: `https://<host-ip>:8220`
+- APM Server: `https://<host-ip>:8200`
+
+##### Switching Back to Self-Signed
+
+```bash
+# Edit .env: set INGRESS_MODE to selfsigned
+INGRESS_MODE=selfsigned
 docker compose down && docker compose up -d
 ```
 
@@ -100,25 +116,48 @@ This mode uses Traefik as a reverse proxy with Let's Encrypt certificates obtain
 
 **Best for:** Air-gapped environments or internal networks where you control all clients.
 
-This mode uses Traefik as a reverse proxy but with the Elasticsearch-generated CA for TLS. Traefik properly validates backend service certificates using the internal CA (no `insecureSkipVerify`). Clients connecting through Traefik will need to trust the ES-generated CA.
+This mode uses Traefik as a reverse proxy with ES CA-signed certificates. All domain names are included as SANs (Subject Alternative Names) in a single certificate.
+
+Traefik properly validates backend service certificates using the internal CA (no `insecureSkipVerify`).
 
 **Requirements:**
 
-- Distribute `ca.crt` to all clients/agents
-- Configure clients to trust the CA
+- **Browser users:** Click "proceed to site" when prompted about the untrusted certificate. Use incognito/private browsing if you encounter cached certificate issues.
+- **Elastic Agents:** Distribute `ca.crt` and configure agents to trust the CA
 - No internet access required
 
-#### Option 3: Direct Access (No Traefik)
+**Agent CA Certificate**
 
-**Best for:** Development, testing, or minimal setups.
+For Elastic Agents connecting to Fleet/ES, extract and distribute the CA:
 
-This mode bypasses Traefik entirely. Clients connect directly to Elasticsearch, Kibana, and Fleet Server using the ports exposed by Docker. All TLS is handled by the Elasticsearch-generated certificates.
+```bash
+docker cp $(docker compose ps -q setup):/certs/ca/ca.crt ./ca.crt
+```
+
+#### Option 3: Direct Access (IP:Port)
+
+**Best for:** Development, testing, or environments without DNS.
+
+This mode uses Traefik with port-based routing instead of hostname routing. Each service is accessible on its dedicated port via the host IP address. No DNS configuration required.
+
+**Access URLs:**
+
+- Kibana: `https://<host-ip>:5601`
+- Elasticsearch: `https://<host-ip>:9200`
+- Fleet Server: `https://<host-ip>:8220`
+- APM Server: `https://<host-ip>:8200`
 
 **Requirements:**
 
-- Distribute `ca.crt` to all clients/agents
-- Access services by IP:port (e.g., `https://192.168.1.100:9200`)
+- **Browser users:** Click "proceed to site" when prompted about the untrusted certificate
+- **Elastic Agents:** Distribute `ca.crt` and configure agents to trust the CA
 - No DNS configuration required
+
+Extract and distribute the CA for Elastic Agents:
+
+```bash
+docker cp $(docker compose ps -q setup):/certs/ca/ca.crt ./ca.crt
+```
 
 ---
 
