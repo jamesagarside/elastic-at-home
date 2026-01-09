@@ -14,12 +14,12 @@ on:
       use_staging:
         description: 'Use Let''s Encrypt staging (recommended for testing)'
         required: false
-        default: 'true'
+        default: true
         type: boolean
       debug:
         description: 'Enable debug output'
         required: false
-        default: 'false'
+        default: false
         type: boolean
 
   # Optional: scheduled weekly test
@@ -310,76 +310,18 @@ jobs:
             echo "Warning: Certificate may not be from Let's Encrypt"
           fi
 
-      - name: Run certificate tests
-        id: cert_tests
+      - name: Run full test suite
+        id: tests
         run: |
           export ELASTICSEARCH_URL="https://${{ steps.domains.outputs.es_domain }}"
           export KIBANA_URL="https://${{ steps.domains.outputs.kibana_domain }}"
           export FLEET_URL="https://${{ steps.domains.outputs.fleet_domain }}"
           export ELASTIC_PASSWORD="TestPassword123!"
           export INGRESS_MODE="letsencrypt"
+          export DEBUG="${{ github.event.inputs.debug || 'false' }}"
           # No CA_CERT needed for Let's Encrypt
 
-          bash .github/scripts/test-stack.sh certificates
-        continue-on-error: true
-
-      - name: Run Elasticsearch tests
-        id: es_tests
-        run: |
-          export ELASTICSEARCH_URL="https://${{ steps.domains.outputs.es_domain }}"
-          export KIBANA_URL="https://${{ steps.domains.outputs.kibana_domain }}"
-          export FLEET_URL="https://${{ steps.domains.outputs.fleet_domain }}"
-          export ELASTIC_PASSWORD="TestPassword123!"
-          export INGRESS_MODE="letsencrypt"
-
-          bash .github/scripts/test-stack.sh elasticsearch
-        continue-on-error: true
-
-      - name: Run Kibana tests
-        id: kibana_tests
-        run: |
-          export ELASTICSEARCH_URL="https://${{ steps.domains.outputs.es_domain }}"
-          export KIBANA_URL="https://${{ steps.domains.outputs.kibana_domain }}"
-          export FLEET_URL="https://${{ steps.domains.outputs.fleet_domain }}"
-          export ELASTIC_PASSWORD="TestPassword123!"
-          export INGRESS_MODE="letsencrypt"
-
-          bash .github/scripts/test-stack.sh kibana
-        continue-on-error: true
-
-      - name: Run Fleet tests
-        id: fleet_tests
-        run: |
-          export ELASTICSEARCH_URL="https://${{ steps.domains.outputs.es_domain }}"
-          export KIBANA_URL="https://${{ steps.domains.outputs.kibana_domain }}"
-          export FLEET_URL="https://${{ steps.domains.outputs.fleet_domain }}"
-          export ELASTIC_PASSWORD="TestPassword123!"
-          export INGRESS_MODE="letsencrypt"
-
-          bash .github/scripts/test-stack.sh fleet
-        continue-on-error: true
-
-      - name: Run Agent tests
-        id: agent_tests
-        run: |
-          export ELASTICSEARCH_URL="https://${{ steps.domains.outputs.es_domain }}"
-          export KIBANA_URL="https://${{ steps.domains.outputs.kibana_domain }}"
-          export FLEET_URL="https://${{ steps.domains.outputs.fleet_domain }}"
-          export ELASTIC_PASSWORD="TestPassword123!"
-          export INGRESS_MODE="letsencrypt"
-
-          bash .github/scripts/test-stack.sh agent
-        continue-on-error: true
-
-      - name: Run full test suite
-        id: full_tests
-        run: |
-          export ELASTICSEARCH_URL="https://${{ steps.domains.outputs.es_domain }}"
-          export KIBANA_URL="https://${{ steps.domains.outputs.kibana_domain }}"
-          export FLEET_URL="https://${{ steps.domains.outputs.fleet_domain }}"
-          export ELASTIC_PASSWORD="TestPassword123!"
-          export INGRESS_MODE="letsencrypt"
-
+          # Run full test suite - includes certificates, elasticsearch, kibana, fleet, and agent tests
           bash .github/scripts/test-stack.sh all
 
       - name: Test external HTTPS access

@@ -28,7 +28,7 @@ on:
       debug:
         description: 'Enable debug output'
         required: false
-        default: 'false'
+        default: false
         type: boolean
 
 env:
@@ -217,8 +217,8 @@ jobs:
 
           echo "Direct port access verification complete"
 
-      - name: Run certificate tests
-        id: cert_tests
+      - name: Run full test suite
+        id: tests
         run: |
           export ELASTICSEARCH_URL="https://localhost:9200"
           export KIBANA_URL="https://localhost:5601"
@@ -226,67 +226,9 @@ jobs:
           export ELASTIC_PASSWORD="TestPassword123!"
           export CA_CERT="./ca.crt"
           export INGRESS_MODE="direct"
+          export DEBUG="${{ github.event.inputs.debug || 'false' }}"
 
-          bash .github/scripts/test-stack.sh certificates
-        continue-on-error: true
-
-      - name: Run Elasticsearch tests
-        id: es_tests
-        run: |
-          export ELASTICSEARCH_URL="https://localhost:9200"
-          export KIBANA_URL="https://localhost:5601"
-          export FLEET_URL="https://localhost:8220"
-          export ELASTIC_PASSWORD="TestPassword123!"
-          export CA_CERT="./ca.crt"
-
-          bash .github/scripts/test-stack.sh elasticsearch
-        continue-on-error: true
-
-      - name: Run Kibana tests
-        id: kibana_tests
-        run: |
-          export ELASTICSEARCH_URL="https://localhost:9200"
-          export KIBANA_URL="https://localhost:5601"
-          export FLEET_URL="https://localhost:8220"
-          export ELASTIC_PASSWORD="TestPassword123!"
-          export CA_CERT="./ca.crt"
-
-          bash .github/scripts/test-stack.sh kibana
-        continue-on-error: true
-
-      - name: Run Fleet tests
-        id: fleet_tests
-        run: |
-          export ELASTICSEARCH_URL="https://localhost:9200"
-          export KIBANA_URL="https://localhost:5601"
-          export FLEET_URL="https://localhost:8220"
-          export ELASTIC_PASSWORD="TestPassword123!"
-          export CA_CERT="./ca.crt"
-
-          bash .github/scripts/test-stack.sh fleet
-        continue-on-error: true
-
-      - name: Run Agent tests
-        id: agent_tests
-        run: |
-          export ELASTICSEARCH_URL="https://localhost:9200"
-          export KIBANA_URL="https://localhost:5601"
-          export FLEET_URL="https://localhost:8220"
-          export ELASTIC_PASSWORD="TestPassword123!"
-          export CA_CERT="./ca.crt"
-
-          bash .github/scripts/test-stack.sh agent
-        continue-on-error: true
-
-      - name: Run full test suite
-        id: full_tests
-        run: |
-          export ELASTICSEARCH_URL="https://localhost:9200"
-          export KIBANA_URL="https://localhost:5601"
-          export FLEET_URL="https://localhost:8220"
-          export ELASTIC_PASSWORD="TestPassword123!"
-          export CA_CERT="./ca.crt"
-
+          # Run full test suite - includes certificates, elasticsearch, kibana, fleet, and agent tests
           bash .github/scripts/test-stack.sh all
 
       - name: Collect logs on failure
