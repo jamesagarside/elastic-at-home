@@ -59,12 +59,11 @@ jobs:
         run: |
           echo "Current Docker Compose version:"
           docker compose version
-          # Install latest Docker Compose for extra_hosts list syntax support
-          DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}
-          mkdir -p $DOCKER_CONFIG/cli-plugins
-          curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
-            -o $DOCKER_CONFIG/cli-plugins/docker-compose
-          chmod +x $DOCKER_CONFIG/cli-plugins/docker-compose
+          # Install latest Docker Compose system-wide for extra_hosts list syntax support
+          sudo mkdir -p /usr/local/lib/docker/cli-plugins
+          sudo curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
+            -o /usr/local/lib/docker/cli-plugins/docker-compose
+          sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
           echo "Updated Docker Compose version:"
           docker compose version
 
