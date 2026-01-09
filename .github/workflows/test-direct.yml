@@ -50,13 +50,21 @@ jobs:
 
       - name: Ensure Docker Compose v2
         run: |
-          echo "Current Docker Compose version:"
+          echo "Current Docker Compose version and location:"
           docker compose version
-          # Install latest Docker Compose system-wide for extra_hosts list syntax support
-          sudo mkdir -p /usr/local/lib/docker/cli-plugins
+          which docker-compose || true
+          ls -la /usr/libexec/docker/cli-plugins/ 2>/dev/null || true
+          ls -la /usr/local/lib/docker/cli-plugins/ 2>/dev/null || true
+
+          # Find and replace the actual docker-compose binary
+          COMPOSE_PATH=$(docker info --format '{{.ClientInfo.Plugins}}' 2>/dev/null | grep -oP 'compose[^}]*Path[^}]*\K/[^"]+' || echo "/usr/libexec/docker/cli-plugins/docker-compose")
+          echo "Detected compose path: $COMPOSE_PATH"
+
+          # Download and replace with latest version
           sudo curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
-            -o /usr/local/lib/docker/cli-plugins/docker-compose
-          sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+            -o "$COMPOSE_PATH"
+          sudo chmod +x "$COMPOSE_PATH"
+
           echo "Updated Docker Compose version:"
           docker compose version
 
