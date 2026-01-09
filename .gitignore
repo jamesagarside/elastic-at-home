@@ -1,4 +1,5 @@
 .claude/
+.beads/
 .env
 .env.pi
 .structurizr
