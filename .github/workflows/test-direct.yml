@@ -48,6 +48,19 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Ensure Docker Compose v2
+        run: |
+          echo "Current Docker Compose version:"
+          docker compose version
+          # Install latest Docker Compose for extra_hosts list syntax support
+          DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}
+          mkdir -p $DOCKER_CONFIG/cli-plugins
+          curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
+            -o $DOCKER_CONFIG/cli-plugins/docker-compose
+          chmod +x $DOCKER_CONFIG/cli-plugins/docker-compose
+          echo "Updated Docker Compose version:"
+          docker compose version
+
       - name: Create .env file
         run: |
           cat > .env << 'EOF'
