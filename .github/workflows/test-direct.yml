@@ -53,14 +53,19 @@ jobs:
           echo "Current Docker Compose version:"
           docker compose version
 
-          # Get the path where Docker finds the compose plugin
-          COMPOSE_PATH=$(docker info --format '{{range .ClientInfo.Plugins}}{{if eq .Name "compose"}}{{.Path}}{{end}}{{end}}')
-          echo "Docker compose plugin at: $COMPOSE_PATH"
-
-          # Download and replace with latest version
+          # Download latest compose to temp location
           sudo curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
-            -o "$COMPOSE_PATH"
-          sudo chmod +x "$COMPOSE_PATH"
+            -o /tmp/docker-compose-latest
+          sudo chmod +x /tmp/docker-compose-latest
+
+          # Replace in ALL possible plugin locations to ensure it takes effect
+          for dir in /usr/libexec/docker/cli-plugins /usr/local/lib/docker/cli-plugins /usr/lib/docker/cli-plugins ~/.docker/cli-plugins; do
+            if [[ -d "$dir" ]] || [[ "$dir" == "/usr/libexec/docker/cli-plugins" ]]; then
+              sudo mkdir -p "$dir"
+              sudo cp /tmp/docker-compose-latest "$dir/docker-compose"
+              echo "Installed to: $dir/docker-compose"
+            fi
+          done
 
           echo "Updated Docker Compose version:"
           docker compose version
