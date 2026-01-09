@@ -122,6 +122,13 @@ jobs:
         run: |
           sudo sysctl -w vm.max_map_count=262144
 
+      - name: Verify Docker Compose version before starting stack
+        run: |
+          echo "Verifying Docker Compose version before starting stack..."
+          docker compose version
+          which docker || true
+          which docker-compose || true
+
       - name: Start Elastic Stack
         run: |
           echo "Starting Elastic Stack with direct access mode (port-based routing)..."
