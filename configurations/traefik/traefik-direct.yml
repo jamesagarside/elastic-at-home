@@ -1,4 +1,4 @@
-# Traefik Static Configuration - Direct Access Mode
+# Traefik Configuration - Direct Access Mode
 #
 # This configuration provides port-based routing for IP access.
 # Access services directly via host IP and service-specific ports:
@@ -31,17 +31,8 @@ providers:
   file:
     filename: /etc/traefik/dynamic.yaml
 
-# Port-based entrypoints for direct IP access
+# Port-based entrypoints for direct IP access (no hostname routing)
 entryPoints:
-  web:
-    address: ":80"
-    http:
-      redirections:
-        entryPoint:
-          to: websecure
-          scheme: https
-  websecure:
-    address: ":443"
   # Service-specific ports for direct access
   elasticsearch:
     address: ":9200"
@@ -56,3 +47,5 @@ entryPoints:
     address: ":514"
   syslog-udp:
     address: ":514/udp"
+
+# TLS, routers, services, and serversTransports are loaded from dynamic.yaml

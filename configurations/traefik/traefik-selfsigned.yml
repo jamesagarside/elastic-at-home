@@ -1,4 +1,4 @@
-# Traefik Static Configuration - Self-Signed Mode
+# Traefik Configuration - Self-Signed Mode
 #
 # This configuration uses ES CA-signed certificates for all services.
 # All domain names are included as SANs in a single certificate.
@@ -38,9 +38,11 @@ entryPoints:
           scheme: https
   websecure:
     address: ":443"
+    http:
+      tls: {}
   syslog-tcp:
     address: ":514"
   syslog-udp:
     address: ":514/udp"
 
-# No certificatesResolvers - uses certificates from dynamic.yaml
+# TLS and serversTransports are loaded from dynamic.yaml

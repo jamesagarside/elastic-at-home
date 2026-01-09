@@ -1,4 +1,4 @@
-# Traefik Static Configuration - Let's Encrypt Mode
+# Traefik Configuration - Let's Encrypt Mode
 #
 # This configuration uses Let's Encrypt with Cloudflare DNS challenge
 # for publicly trusted TLS certificates.
@@ -41,11 +41,9 @@ entryPoints:
     address: ":514/udp"
 
 # Let's Encrypt ACME Configuration
-# Email is set via ACME_EMAIL env var in .env file
 #
 # Note: If ACME fails with SERVFAIL errors, Traefik will automatically retry
-# with exponential backoff. The default certificate from traefik-dynamic.yaml
-# is served while retrying. Common causes of SERVFAIL:
+# with exponential backoff. Common causes of SERVFAIL:
 # - Transient DNS issues (usually resolves on retry)
 # - Zone not properly delegated to Cloudflare
 # - CF_DNS_API_TOKEN lacking Zone:Zone:Read permission
@@ -59,3 +57,5 @@ certificatesResolvers:
         delayBeforeCheck: 90
         # Skip Traefik's own propagation check (Let's Encrypt will verify)
         disablePropagationCheck: true
+
+# ServersTransports are loaded from dynamic.yaml

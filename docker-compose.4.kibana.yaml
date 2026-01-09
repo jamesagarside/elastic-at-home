@@ -10,6 +10,8 @@ services:
       - ./configurations/elastic/fleet-configuration.yaml:/usr/share/kibana/config/kibana.yml
     networks:
       - elastic
+    env_file:
+      - configurations/elastic/env_files/.env.${INGRESS_MODE:-selfsigned}
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.kibana.rule=Host(`${KIBANA_DOMAIN_NAME}`)"

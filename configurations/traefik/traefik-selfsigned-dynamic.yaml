@@ -1,39 +1,23 @@
-# Traefik Dynamic Configuration
-#
-# This file configures:
-# 1. Default TLS certificate for self-signed mode
-# 2. ServersTransports for backend TLS verification using certificate DNS names
-#
-# Certificate Strategy (self-signed mode):
-# - All services use ES CA-signed cert with all domain SANs
-# - Browser users click "proceed to site" to accept the certificate
-# - Agents can trust the CA for secure enrollment
-#
-# When INGRESS_MODE=letsencrypt, ACME fetches certs and this is ignored.
+# Dynamic Configuration - Self-Signed Mode
+# Contains TLS certificates and serversTransports
 
-# TLS Configuration - Default certificate for all services
 tls:
   certificates:
-    # ES CA-signed cert with all service domains as SANs
     - certFile: /certs/traefik/traefik.crt
       keyFile: /certs/traefik/traefik.key
 
 http:
   serversTransports:
-    # Transport for Elasticsearch backend
     es-transport:
       serverName: "es01"
       rootCAs:
         - /certs/ca/ca.crt
 
-    # Transport for Kibana backend
     kibana-transport:
       serverName: "kibana"
       rootCAs:
         - /certs/ca/ca.crt
 
-    # Transport for Fleet Server backend (also serves APM)
-    # Both fleet and apm routes use this transport since they share the same backend
     fleet-transport:
       serverName: "fleet-server"
       rootCAs:
