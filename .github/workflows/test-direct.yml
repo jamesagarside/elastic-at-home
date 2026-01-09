@@ -95,13 +95,14 @@ jobs:
           CLUSTER_NAME=test-cluster
           LICENSE=basic
 
-          # Domain names (used for internal certificate SANs, not routing)
-          KIBANA_DOMAIN_NAME=localhost
-          ES_DOMAIN_NAME=localhost
-          FLEET_DOMAIN_NAME=localhost
-          APM_DOMAIN_NAME=localhost
-          AGENT_DOMAIN_NAME=localhost
-          TRAEFIK_DOMAIN_NAME=localhost
+          # Domain names (used for internal certificate SANs and container host mapping)
+          # Must be unique to avoid duplicate extra_hosts entries
+          KIBANA_DOMAIN_NAME=kibana.local
+          ES_DOMAIN_NAME=es.local
+          FLEET_DOMAIN_NAME=fleet.local
+          APM_DOMAIN_NAME=apm.local
+          AGENT_DOMAIN_NAME=agent.local
+          TRAEFIK_DOMAIN_NAME=traefik.local
 
           # Allowed syslog IPs
           ALLOWED_SYSLOG_IPS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
