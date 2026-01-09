@@ -143,12 +143,6 @@ jobs:
           AGENT_DOMAIN_NAME=${{ steps.domains.outputs.agent_domain }}
           TRAEFIK_DOMAIN_NAME=${{ steps.domains.outputs.traefik_domain }}
 
-          # Port mappings (bind to all interfaces for external access)
-          ES_PORT=0.0.0.0:9200
-          KIBANA_PORT=0.0.0.0:5601
-          FLEET_PORT=0.0.0.0:8220
-          AGENT_PORT=0.0.0.0:5514
-
           # Allowed syslog IPs
           ALLOWED_SYSLOG_IPS=0.0.0.0/0
 
