@@ -53,13 +53,14 @@ jobs:
           echo "Current Docker Compose version:"
           docker compose version
 
-          # Install latest Docker Compose to the standard CLI plugins directory
-          # This path is used by Docker on GitHub Actions ubuntu runners
-          COMPOSE_DIR="/usr/libexec/docker/cli-plugins"
-          sudo mkdir -p "$COMPOSE_DIR"
+          # Get the path where Docker finds the compose plugin
+          COMPOSE_PATH=$(docker info --format '{{range .ClientInfo.Plugins}}{{if eq .Name "compose"}}{{.Path}}{{end}}{{end}}')
+          echo "Docker compose plugin at: $COMPOSE_PATH"
+
+          # Download and replace with latest version
           sudo curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
-            -o "$COMPOSE_DIR/docker-compose"
-          sudo chmod +x "$COMPOSE_DIR/docker-compose"
+            -o "$COMPOSE_PATH"
+          sudo chmod +x "$COMPOSE_PATH"
 
           echo "Updated Docker Compose version:"
           docker compose version
