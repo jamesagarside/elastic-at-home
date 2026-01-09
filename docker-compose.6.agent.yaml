@@ -13,9 +13,9 @@ services:
     user: root
     # Map external domains to Docker host so agent can reach Traefik
     extra_hosts:
-      ${ES_DOMAIN_NAME}: host-gateway
-      ${FLEET_DOMAIN_NAME}: host-gateway
-      ${KIBANA_DOMAIN_NAME}: host-gateway
+      - "${ES_DOMAIN_NAME}:host-gateway"
+      - "${FLEET_DOMAIN_NAME}:host-gateway"
+      - "${KIBANA_DOMAIN_NAME}:host-gateway"
     environment:
       # Fleet enrollment via external URL (Let's Encrypt - uses system CAs)
       - FLEET_ENROLL=1
