@@ -53,8 +53,11 @@ jobs:
           echo "Current Docker Compose version:"
           docker compose version
 
-          # Download latest compose to temp location
-          sudo curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
+          # Pin to v2.32.4 - v5.x has breaking changes with extra_hosts list syntax
+          COMPOSE_VERSION="v2.32.4"
+
+          # Download specific compose version to temp location
+          sudo curl -SL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-x86_64" \
             -o /tmp/docker-compose-latest
           sudo chmod +x /tmp/docker-compose-latest
 
