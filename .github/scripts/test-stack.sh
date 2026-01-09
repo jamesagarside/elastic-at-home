@@ -498,7 +498,7 @@ run_certificate_tests() {
     test_ca_certificate || true
     test_ssl_connection "Elasticsearch" "$ELASTICSEARCH_URL" || true
     test_ssl_connection "Kibana" "$KIBANA_URL" || true
-    test_ssl_connection "Fleet" "$FLEET_URL" || true
+    test_ssl_connection "Fleet" "${FLEET_URL}/api/status" || true
 }
 
 run_elasticsearch_tests() {
