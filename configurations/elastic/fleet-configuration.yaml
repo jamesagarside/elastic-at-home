@@ -113,7 +113,12 @@ xpack.fleet.outputs:
     hosts: ["https://${ES_DOMAIN_NAME}:443"]
     is_default: true
     is_default_monitoring: true
-    # Uses Let's Encrypt - publicly trusted, no custom CA needed
+    config:
+      ssl:
+        # CA cert path set via FLEET_ES_EXTERNAL_CA env var
+        # - selfsigned/direct modes: /certs/ca/ca.crt (Traefik serves certs signed by Elasticsearch CA)
+        # - letsencrypt mode: empty (Let's Encrypt uses publicly trusted certs)
+        certificate_authorities: ${FLEET_ES_EXTERNAL_CA}
 
 # Fleet Server settings used by Fleet when configuring Agents
 # Without these Agents wouldnt know how to connect to Fleet Server
