@@ -173,16 +173,19 @@ test_ssl_connection() {
     port=$(echo "$url" | sed -E 's|https?://[^:]+:([0-9]+).*|\1|')
     port="${port:-443}"
 
+    # For SSL tests, ANY valid HTTP response (including 401, 404) proves SSL works
+    # Only 000 (connection failed) or empty indicates SSL failure
+
     # Method 1: Try with CA cert
     local status=$(api_status "$url")
-    if is_success_status "$status"; then
+    if [[ "$status" =~ ^[1-5][0-9][0-9]$ ]]; then
         record_pass "SSL/TLS connection works (HTTP $status)"
         return 0
     fi
 
     # Method 2: Try insecure (for self-signed without CA)
     status=$(curl -s -k --connect-timeout 10 -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || echo "000")
-    if is_success_status "$status"; then
+    if [[ "$status" =~ ^[1-5][0-9][0-9]$ ]]; then
         record_pass "SSL/TLS connection works with insecure flag (HTTP $status)"
         return 0
     fi
