@@ -5,10 +5,30 @@ services:
         condition: service_healthy
     image: traefik:v3.6.4
     container_name: traefik
-    # Static config auto-selected based on INGRESS_MODE env var:
-    # - "selfsigned": traefik-selfsigned.yml (hostname routing via 443)
-    # - "letsencrypt": traefik-letsencrypt.yml (hostname routing via 443)
-    # - "direct": traefik-direct.yml (port-based routing for IP access)
+    # ==========================================================================
+    # Traefik Configuration File Selection
+    # ==========================================================================
+    # Config files are auto-selected based on INGRESS_MODE env var (.env file).
+    # Each mode has a static config (.yml) and dynamic config (-dynamic.yaml):
+    #
+    # INGRESS_MODE=selfsigned (default):
+    #   - traefik-selfsigned.yml         → Static config (entrypoints, providers)
+    #   - traefik-selfsigned-dynamic.yaml → Dynamic config (TLS certs, transports)
+    #   - Uses ES CA-signed certificates, works in air-gapped environments
+    #   - Access via hostnames (kibana.example.com, etc.)
+    #
+    # INGRESS_MODE=letsencrypt:
+    #   - traefik-letsencrypt.yml         → Static config (+ ACME resolver)
+    #   - traefik-letsencrypt-dynamic.yaml → Dynamic config (transports only)
+    #   - Uses Let's Encrypt via Cloudflare DNS challenge
+    #   - Requires: CF_DNS_API_TOKEN, ACME_EMAIL, public DNS records
+    #
+    # INGRESS_MODE=direct:
+    #   - traefik-direct.yml              → Static config (+ port entrypoints)
+    #   - traefik-direct-dynamic.yaml     → Dynamic config (TLS, routers, services)
+    #   - Port-based routing for IP access (no DNS required)
+    #   - Access via IP:port (https://192.168.1.x:9200, etc.)
+    # ==========================================================================
     ports:
       - "80:80"
       - "443:443"

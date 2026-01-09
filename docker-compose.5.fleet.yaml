@@ -15,6 +15,8 @@ services:
       - "${ES_DOMAIN_NAME}:host-gateway"
       - "${FLEET_DOMAIN_NAME}:host-gateway"
       - "${KIBANA_DOMAIN_NAME}:host-gateway"
+    env_file:
+      - configurations/elastic/env_files/.env.${INGRESS_MODE:-selfsigned}
     environment:
       - ELASTICSEARCH_HOST=https://es01:9200
       - ELASTICSEARCH_USERNAME=elastic

@@ -1,4 +1,4 @@
-# Traefik Static Configuration - Direct Access Mode
+# Traefik Configuration - Direct Access Mode
 #
 # This configuration provides port-based routing for IP access.
 # Access services directly via host IP and service-specific ports:
@@ -56,3 +56,5 @@ entryPoints:
     address: ":514"
   syslog-udp:
     address: ":514/udp"
+
+# TLS, routers, services, and serversTransports are loaded from dynamic.yaml

@@ -16,6 +16,8 @@ services:
       - "${ES_DOMAIN_NAME}:host-gateway"
       - "${FLEET_DOMAIN_NAME}:host-gateway"
       - "${KIBANA_DOMAIN_NAME}:host-gateway"
+    env_file:
+      - configurations/elastic/env_files/.env.${INGRESS_MODE:-selfsigned}
     environment:
       # Fleet enrollment via external URL (Let's Encrypt - uses system CAs)
       - FLEET_ENROLL=1
