@@ -453,6 +453,79 @@ test_agent_data() {
 }
 
 # =============================================================================
+# Syslog Ingestion Tests
+# =============================================================================
+
+SYSLOG_HOST="${SYSLOG_HOST:-localhost}"
+SYSLOG_PORT="${SYSLOG_PORT:-514}"
+
+test_syslog_connectivity() {
+    log_test_start "Syslog Port Connectivity"
+
+    # Check if syslog port is open using nc
+    if nc -z -w 5 "$SYSLOG_HOST" "$SYSLOG_PORT" 2>/dev/null; then
+        record_pass "Syslog port ${SYSLOG_HOST}:${SYSLOG_PORT} is reachable"
+        return 0
+    fi
+
+    # Fallback: try with /dev/tcp
+    if timeout 5 bash -c "echo > /dev/tcp/${SYSLOG_HOST}/${SYSLOG_PORT}" 2>/dev/null; then
+        record_pass "Syslog port ${SYSLOG_HOST}:${SYSLOG_PORT} is reachable"
+        return 0
+    fi
+
+    record_fail "Syslog port ${SYSLOG_HOST}:${SYSLOG_PORT} not reachable"
+    return 1
+}
+
+test_syslog_ingestion() {
+    log_test_start "Syslog Ingestion (TCP)"
+
+    # Generate unique test message with timestamp
+    local test_id="SYSLOG_TEST_$(date +%s)_$$"
+    local test_message="<14>1 $(date -u +%Y-%m-%dT%H:%M:%SZ) testhost testapp - - - ${test_id}"
+
+    # Send syslog message via TCP
+    log_info "Sending test syslog message: ${test_id}"
+    if ! echo "$test_message" | nc -w 5 "$SYSLOG_HOST" "$SYSLOG_PORT" 2>/dev/null; then
+        # Try with timeout command if nc -w not supported
+        if ! echo "$test_message" | timeout 5 nc "$SYSLOG_HOST" "$SYSLOG_PORT" 2>/dev/null; then
+            record_fail "Failed to send syslog message to ${SYSLOG_HOST}:${SYSLOG_PORT}"
+            return 1
+        fi
+    fi
+
+    log_info "Waiting for message ingestion (30s)..."
+    sleep 30
+
+    # Search for the message in Elasticsearch
+    local search_query='{"query":{"bool":{"should":[{"match_phrase":{"message":"'"${test_id}"'"}},{"match_phrase":{"log.original":"'"${test_id}"'"}}]}}}'
+    local response=$(curl $(_curl_opts) -u "${ELASTIC_USER}:${ELASTIC_PASSWORD}" \
+        -H "Content-Type: application/json" \
+        -d "$search_query" \
+        "${ELASTICSEARCH_URL}/logs-*/_search?size=1" 2>&1)
+
+    local hits=$(json_get '.hits.total.value' "$response")
+
+    if [[ "$hits" =~ ^[0-9]+$ && "$hits" -gt 0 ]]; then
+        record_pass "Syslog message ingested successfully (found $hits documents)"
+        return 0
+    fi
+
+    # Check if any logs-tcp* or logs-udp* indices exist
+    local indices=$(api_get "${ELASTICSEARCH_URL}/_cat/indices/logs-tcp*,logs-udp*?h=index" 2>/dev/null || echo "")
+    if [[ -z "$indices" || "$indices" == *"index_not_found"* ]]; then
+        log_warning "No syslog indices found (logs-tcp*, logs-udp*) - syslog input may not be configured"
+        record_skip "Syslog ingestion - no syslog indices present"
+        return 0
+    fi
+
+    LAST_RESPONSE="$response"
+    record_fail "Syslog message not found in Elasticsearch after 30s"
+    return 1
+}
+
+# =============================================================================
 # User Tests (for custom user validation)
 # =============================================================================
 
@@ -528,12 +601,19 @@ run_agent_tests() {
     test_agent_data || true
 }
 
+run_syslog_tests() {
+    echo -e "\n${BLUE}═══ Syslog Ingestion Tests ═══${NC}"
+    test_syslog_connectivity || true
+    test_syslog_ingestion || true
+}
+
 run_all_tests() {
     run_certificate_tests
     run_elasticsearch_tests
     run_kibana_tests
     run_fleet_tests
     run_agent_tests
+    run_syslog_tests
 }
 
 # =============================================================================
@@ -549,6 +629,7 @@ main() {
     echo -e "Elasticsearch: $ELASTICSEARCH_URL"
     echo -e "Kibana:        $KIBANA_URL"
     echo -e "Fleet:         $FLEET_URL"
+    echo -e "Syslog:        ${SYSLOG_HOST}:${SYSLOG_PORT}"
     echo -e "Ingress Mode:  $INGRESS_MODE"
     echo -e "CA Cert:       ${CA_CERT:-none}"
     echo -e "Debug:         $DEBUG"
@@ -559,10 +640,11 @@ main() {
         kibana|kb)          run_kibana_tests ;;
         fleet)              run_fleet_tests ;;
         agent)              run_agent_tests ;;
+        syslog)             run_syslog_tests ;;
         all)                run_all_tests ;;
         *)
             echo "Unknown test suite: $test_suite"
-            echo "Available: all, certificates, elasticsearch, kibana, fleet, agent"
+            echo "Available: all, certificates, elasticsearch, kibana, fleet, agent, syslog"
             exit 1
             ;;
     esac
