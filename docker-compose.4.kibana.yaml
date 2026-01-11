@@ -20,10 +20,13 @@ services:
       - "traefik.http.services.kibana.loadbalancer.server.scheme=https"
       # Reference serversTransport from file provider for TLS verification
       - "traefik.http.services.kibana.loadbalancer.serversTransport=kibana-transport@file"
+    env_file:
+      - configurations/elastic/env_files/.env.${INGRESS_MODE:-selfsigned}
     environment:
       SERVERNAME: kibana
       SERVER_HOST: "0.0.0.0"
-      SERVER_PUBLICBASEURL: https://${KIBANA_DOMAIN_NAME}:443
+      # For direct mode, override SERVER_PUBLICBASEURL in main .env with port (e.g., https://192.168.3.100:5601)
+      SERVER_PUBLICBASEURL: ${SERVER_PUBLICBASEURL:-https://${KIBANA_DOMAIN_NAME}}
       SERVER_SHUTDOWNTIMEOUT: "5s"
       ELASTICSEARCH_HOSTS: https://es01:9200
       ELASTICSEARCH_USERNAME: kibana_system
@@ -39,6 +42,7 @@ services:
       FLEET_DOMAIN_NAME: ${FLEET_DOMAIN_NAME}
       APM_DOMAIN_NAME: ${APM_DOMAIN_NAME}
       APM_SECRET_TOKEN: ${APM_SECRET_TOKEN}
+      # Port variables loaded from mode-specific env_file (env_file takes precedence when not in environment section)
     mem_limit: ${KB_MEM_LIMIT}
     healthcheck:
       test:

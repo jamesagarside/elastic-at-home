@@ -52,6 +52,81 @@ Certificate mode is controlled by a single environment variable. The correct Tra
 | `letsencrypt`       | `traefik-letsencrypt.yml`  | Hostname via port 443 |
 | `direct`            | `traefik-direct.yml`       | IP via service ports  |
 
+##### Mode-Specific Configuration Architecture
+
+**Design Philosophy**
+
+Elastic at Home uses mode-specific environment files to automatically configure certificate handling and CA validation based on your chosen `INGRESS_MODE`. This approach ensures:
+
+- **Single Variable Switching**: Only `INGRESS_MODE` needs to change - all other configuration adjusts automatically
+- **Zero Manual Configuration**: No need to edit multiple files or remember mode-specific settings
+- **Error Prevention**: Eliminates common misconfigurations like missing CA certs or wrong trust chains
+
+**How It Works**
+
+Mode-specific env files are located in `configurations/elastic/env_files/`:
+
+```
+configurations/elastic/env_files/
+├── .env.selfsigned    # Self-signed mode variables
+├── .env.letsencrypt   # Let's Encrypt mode variables
+└── .env.direct        # Direct access mode variables
+```
+
+Services automatically load the correct file via Docker Compose's `env_file` directive:
+
+```yaml
+env_file:
+  - configurations/elastic/env_files/.env.${INGRESS_MODE:-selfsigned}
+```
+
+**Mode-Specific Variables**
+
+Each mode configures different CA certificate paths and validation settings:
+
+| Variable | selfsigned/direct | letsencrypt | Purpose |
+|----------|------------------|-------------|---------|
+| `FLEET_CA` | `/certs/ca/ca.crt` | (unset) | Fleet Server → Elasticsearch CA validation |
+| `ELASTICSEARCH_CA` | `/certs/ca/ca.crt` | (unset) | Agent → Elasticsearch CA validation |
+| `KIBANA_FLEET_CA` | `/certs/ca/ca.crt` | (unset) | Kibana → Fleet Server CA validation |
+| `FLEET_ES_EXTERNAL_CA` | `["/certs/ca/ca.crt"]` | `[]` | Fleet monitoring → External ES output CA (YAML array format) |
+
+**Why Different CA Settings Per Mode?**
+
+- **selfsigned/direct modes**: Traefik serves certificates signed by Elasticsearch's CA
+  - Agents and services need `/certs/ca/ca.crt` to validate these self-signed certificates
+  - Without the CA cert, connections fail with "certificate signed by unknown authority"
+
+- **letsencrypt mode**: Traefik serves publicly trusted Let's Encrypt certificates
+  - System trust store already contains Let's Encrypt CA
+  - Specifying custom CA cert would break validation (wrong trust chain)
+  - CA variables are empty or unset to use system defaults
+
+**Configuration Example**
+
+`.env.selfsigned`:
+```bash
+FLEET_CA=/certs/ca/ca.crt
+ELASTICSEARCH_CA=/certs/ca/ca.crt
+KIBANA_FLEET_CA=/certs/ca/ca.crt
+FLEET_ES_EXTERNAL_CA=["/certs/ca/ca.crt"]
+```
+
+`.env.letsencrypt`:
+```bash
+# Let's Encrypt mode - uses system CAs, no custom CA needed
+FLEET_ES_EXTERNAL_CA=[]
+```
+
+**When Variables Are Used**
+
+Mode-specific variables are substituted into:
+- Fleet configuration: `configurations/elastic/fleet-configuration.yaml`
+- Container environment via `env_file` directive
+- Agent enrollment and communication settings
+
+This ensures the entire stack uses the correct certificate validation for your chosen mode.
+
 **Self-Signed Mode (Default)**
 
 Self-signed mode works out of the box with no changes required:
@@ -158,6 +233,15 @@ Extract and distribute the CA for Elastic Agents:
 ```bash
 docker cp $(docker compose ps -q setup):/certs/ca/ca.crt ./ca.crt
 ```
+
+#### Expected Log Messages
+
+> [!NOTE]
+> In **selfsigned** and **direct** modes, you may see errors in the Traefik logs like:
+>
+> `ERR Router uses a nonexistent certificate resolver certificateResolver=selfsigned routerName=kibana@docker`
+>
+> **These errors are expected and can be safely ignored.** They occur because Docker labels reference a certificate resolver that only exists in Let's Encrypt mode. Traefik falls back to the TLS certificates configured in the dynamic config file.
 
 ---
 
