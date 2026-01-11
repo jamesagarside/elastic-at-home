@@ -48,29 +48,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Ensure Docker Compose v2
+      - name: Verify Docker Compose version
         run: |
-          echo "Current Docker Compose version:"
-          docker compose version
-
-          # Pin to v2.32.4 - v5.x has breaking changes with extra_hosts list syntax
-          COMPOSE_VERSION="v2.32.4"
-
-          # Download specific compose version to temp location
-          sudo curl -SL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-x86_64" \
-            -o /tmp/docker-compose-latest
-          sudo chmod +x /tmp/docker-compose-latest
-
-          # Replace in ALL possible plugin locations to ensure it takes effect
-          for dir in /usr/libexec/docker/cli-plugins /usr/local/lib/docker/cli-plugins /usr/lib/docker/cli-plugins ~/.docker/cli-plugins; do
-            if [[ -d "$dir" ]] || [[ "$dir" == "/usr/libexec/docker/cli-plugins" ]]; then
-              sudo mkdir -p "$dir"
-              sudo cp /tmp/docker-compose-latest "$dir/docker-compose"
-              echo "Installed to: $dir/docker-compose"
-            fi
-          done
-
-          echo "Updated Docker Compose version:"
+          echo "Docker Compose version:"
           docker compose version
 
       - name: Create .env file
@@ -122,13 +102,6 @@ jobs:
       - name: Increase vm.max_map_count for Elasticsearch
         run: |
           sudo sysctl -w vm.max_map_count=262144
-
-      - name: Verify Docker Compose version before starting stack
-        run: |
-          echo "Verifying Docker Compose version before starting stack..."
-          docker compose version
-          which docker || true
-          which docker-compose || true
 
       - name: Start Elastic Stack
         run: |

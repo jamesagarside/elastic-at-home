@@ -52,7 +52,7 @@ xpack.fleet.agentPolicies:
               - name: host
                 value: "localhost:8200"
               - name: url
-                value: "https://${APM_DOMAIN_NAME}:443"
+                value: "https://${APM_DOMAIN_NAME}:${EXTERNAL_APM_PORT}"
               - name: secret_token
                 value: "${APM_SECRET_TOKEN}"
               - name: api_key_enabled
@@ -110,15 +110,17 @@ xpack.fleet.outputs:
   - id: es-external
     name: External Elasticsearch Output
     type: elasticsearch
-    hosts: ["https://${ES_DOMAIN_NAME}:443"]
+    hosts: ["https://${ES_DOMAIN_NAME}:${EXTERNAL_ES_PORT}"]
     is_default: true
     is_default_monitoring: true
     config:
       ssl:
-        # CA cert path set via FLEET_ES_EXTERNAL_CA env var
-        # - selfsigned/direct modes: /certs/ca/ca.crt (Traefik serves certs signed by Elasticsearch CA)
-        # - letsencrypt mode: empty (Let's Encrypt uses publicly trusted certs)
-        certificate_authorities: ${FLEET_ES_EXTERNAL_CA}
+        # Both system CAs and internal CA - works for all modes:
+        # - letsencrypt: validated by system CAs (includes Let's Encrypt roots)
+        # - selfsigned/direct: validated by internal CA
+        certificate_authorities:
+          - /etc/ssl/certs/ca-bundle.crt
+          - /certs/ca/ca.crt
 
 # Fleet Server settings used by Fleet when configuring Agents
 # Without these Agents wouldnt know how to connect to Fleet Server
@@ -129,5 +131,5 @@ xpack.fleet.fleetServerHosts:
     is_internal: true
   - id: fleet-external-fleet-server-host
     name: External Fleet Server Host
-    host_urls: ["https://${FLEET_DOMAIN_NAME}:443"]
+    host_urls: ["https://${FLEET_DOMAIN_NAME}:${EXTERNAL_FLEET_PORT}"]
     is_default: true

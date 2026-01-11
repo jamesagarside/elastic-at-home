@@ -57,5 +57,9 @@ certificatesResolvers:
         delayBeforeCheck: 90
         # Skip Traefik's own propagation check (Let's Encrypt will verify)
         disablePropagationCheck: true
-
+        # Use public DNS for ACME zone detection - Docker's embedded DNS (127.0.0.11)
+        # may return SERVFAIL for SOA queries needed to find the authoritative zone
+        resolvers:
+          - "1.1.1.1:53"
+          - "8.8.8.8:53"
 # ServersTransports are loaded from dynamic.yaml

@@ -19,14 +19,13 @@ services:
     env_file:
       - configurations/elastic/env_files/.env.${INGRESS_MODE:-selfsigned}
     environment:
-      # Fleet enrollment via external URL (Let's Encrypt - uses system CAs)
+      # Fleet enrollment - FLEET_URL and KIBANA_HOST set in mode-specific env_file
       - FLEET_ENROLL=1
-      - FLEET_URL=https://${FLEET_DOMAIN_NAME}:443
-      # Kibana settings for enrollment token retrieval (internal)
-      - KIBANA_HOST=https://${KIBANA_DOMAIN_NAME}:443
       - KIBANA_FLEET_USERNAME=elastic
       - KIBANA_FLEET_PASSWORD=${ELASTIC_PASSWORD}
       - FLEET_TOKEN_POLICY_NAME=SIEM Agent Policy
+      - FLEET_URL=https://${FLEET_DOMAIN_NAME:-fleet-server:8220}
+      - KIBANA_HOST=https://${KIBANA_DOMAIN_NAME:-kibana:5601}
     labels:
       - "traefik.enable=true"
       # TCP Router for syslog over TCP (restricted by source IP)

@@ -12,6 +12,7 @@ services:
       - FLEET_DOMAIN_NAME=${FLEET_DOMAIN_NAME}
       - APM_DOMAIN_NAME=${APM_DOMAIN_NAME}
       - TRAEFIK_DOMAIN_NAME=${TRAEFIK_DOMAIN_NAME}
+      - TRAEFIK_IP=${TRAEFIK_IP}
     command: >
       bash -c '
         if [ -f config/certs/.setup_complete ]; then
@@ -68,7 +69,7 @@ services:
           "      - ${APM_DOMAIN_NAME}\n"\
           "      - ${TRAEFIK_DOMAIN_NAME}\n"\
           "    ip:\n"\
-          "      - 127.0.0.1\n"\
+          "      - ${TRAEFIK_IP:-127.0.0.1}\n"\
           > config/certs/instances.yml;
           bin/elasticsearch-certutil cert --silent --pem -out config/certs/certs.zip --in config/certs/instances.yml --ca-cert config/certs/ca/ca.crt --ca-key config/certs/ca/ca.key;
           unzip config/certs/certs.zip -d config/certs;

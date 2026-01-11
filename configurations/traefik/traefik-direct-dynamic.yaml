@@ -5,6 +5,11 @@ tls:
   certificates:
     - certFile: /certs/traefik/traefik.crt
       keyFile: /certs/traefik/traefik.key
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /certs/traefik/traefik.crt
+        keyFile: /certs/traefik/traefik.key
 
 http:
   routers:
