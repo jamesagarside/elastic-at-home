@@ -1,46 +1,119 @@
-# This file holds the fleet configuration which gets
-# applied when first starting the Fleet app within Kibana.
+# =============================================================================
+# FLEET PRECONFIGURATION
+# =============================================================================
 #
-# The inital configuration is applied here to save manually
-# adding the required settings post start allowing for a 
-# fully hands off deployemnt of the Elastic Stack.
+# This file configures Fleet (Elastic's agent management system) at first boot.
+# Fleet manages Elastic Agents deployed across your infrastructure.
+#
+# WHAT IS FLEET?
+#   Fleet is a central control plane for Elastic Agents. Instead of manually
+#   configuring each agent, you define policies here and agents automatically
+#   receive their configuration from Fleet Server.
+#
+# WHAT THIS FILE CONFIGURES:
+#   1. Integration Packages - What data collection capabilities to install
+#   2. Agent Policies - Groups of settings applied to agents
+#   3. Outputs - Where agents should send collected data
+#   4. Fleet Server Hosts - How agents connect to Fleet for management
+#
+# WHY PRECONFIGURE?
+#   Without this file, you'd need to manually configure Fleet through the
+#   Kibana UI after deployment. This enables fully automated deployments.
+#
+# IMPORTANT: Changes here only take effect on FRESH deployments.
+#   To update an existing deployment, use the Kibana Fleet UI or API.
+#
+# =============================================================================
 
-# Tells Fleet which Integration Policies to pre-download
+# =============================================================================
+# INTEGRATION PACKAGES
+# =============================================================================
+# Integration packages are pre-built data collection modules. They include:
+#   - Input configurations (how to collect data)
+#   - Ingest pipelines (how to parse/transform data)
+#   - Dashboards and visualizations (how to view data)
+#
+# Fleet downloads these packages from Elastic's package registry at startup.
+# Using 'latest' ensures you get the newest compatible version.
+# =============================================================================
 xpack.fleet.packages:
+  # system: Collects host metrics (CPU, memory, disk, network) and logs
   - name: system
     version: latest
+
+  # elastic_agent: Monitors the agent itself (health, resource usage)
   - name: elastic_agent
     version: latest
+
+  # apm: Application Performance Monitoring - traces, transactions, errors
   - name: apm
     version: latest
+
+  # fleet_server: Required for Fleet Server to operate
   - name: fleet_server
     version: latest
+
+  # tcp/udp: Custom log inputs - used here for syslog reception
   - name: tcp
     version: latest
   - name: udp
     version: latest
 
-# Agent Policy applied to the Fleet Server
+# =============================================================================
+# AGENT POLICIES
+# =============================================================================
+# Agent Policies define what an agent should do. Each policy contains:
+#   - Package policies: Which integrations to enable
+#   - Output assignment: Where to send data (requires Platinum license)
+#   - Monitoring settings: What agent telemetry to collect
+#
+# Agents enroll to a specific policy. Different agent roles (e.g., Fleet Server
+# vs SIEM collector) should have different policies with appropriate packages.
+# =============================================================================
 xpack.fleet.agentPolicies:
+
+  # ---------------------------------------------------------------------------
+  # FLEET SERVER POLICY
+  # ---------------------------------------------------------------------------
+  # This policy is assigned to the Fleet Server agent. Fleet Server is a
+  # special agent that coordinates all other agents - it distributes policies,
+  # collects agent status, and handles enrollment.
+  #
+  # Packages included:
+  #   - fleet_server: Core Fleet Server functionality
+  #   - apm: APM server runs on Fleet Server (receives traces from apps)
+  # ---------------------------------------------------------------------------
   - name: Fleet Server Policy
     id: fleet-server-policy
     namespace: default
     is_managed: false
-    # Perpolicy output and fleet assignment is a Platinum feature
+
+    # NOTE: Per-policy output assignment requires Platinum/Enterprise license
+    # Without license, agents use the default output defined below
+    # Uncomment these with Platinum license for granular control:
     # data_output_id: es-containerhost
     # monitoring_output_id: es-containerhost
     # fleet_server_host_id: fleet-internal-fleet-server-host
-    unenroll_timeout: 86400
-    inactivity_timeout: 900
+
+    # Agent lifecycle settings
+    unenroll_timeout: 86400    # 24 hours before unenrolled agents are removed
+    inactivity_timeout: 900    # 15 minutes before marking agent as inactive
+
+    # Monitor the Fleet Server agent itself (for troubleshooting)
     monitoring_enabled:
       - logs
       - metrics
       - traces
+
     package_policies:
+      # Fleet Server package - required for Fleet Server operation
       - package:
           name: fleet_server
         name: Fleet Server
         id: fleet-server
+
+      # APM Server - receives application traces and forwards to Elasticsearch
+      # APM instrumentation in your apps sends data here
       - package:
           name: apm
         name: Elastic APM
@@ -49,14 +122,20 @@ xpack.fleet.agentPolicies:
           - type: apm
             enabled: true
             vars:
+              # Internal listen address (container-local)
               - name: host
                 value: "localhost:8200"
+              # External URL - what applications should use to send traces
+              # This goes through Traefik for TLS termination
               - name: url
                 value: "https://${APM_DOMAIN_NAME}:${EXTERNAL_APM_PORT}"
+              # Secret token for authenticating APM clients
               - name: secret_token
                 value: "${APM_SECRET_TOKEN}"
+              # Allow API key authentication (alternative to secret token)
               - name: api_key_enabled
                 value: true
+              # TLS settings for APM server
               - name: tls_enabled
                 value: true
               - name: tls_certificate
@@ -67,69 +146,140 @@ xpack.fleet.agentPolicies:
                 value:
                   - "TLSv1.2"
                   - "TLSv1.3"
+
+  # ---------------------------------------------------------------------------
+  # SIEM AGENT POLICY
+  # ---------------------------------------------------------------------------
+  # This policy is for agents that collect security data. "SIEM" stands for
+  # Security Information and Event Management.
+  #
+  # Packages included:
+  #   - system: Host metrics and logs (baseline monitoring)
+  #   - tcp/udp: Syslog inputs for receiving logs from network devices
+  #
+  # Network devices (firewalls, routers, switches) often send logs via syslog.
+  # This agent receives those logs and forwards them to Elasticsearch.
+  # ---------------------------------------------------------------------------
   - name: SIEM Agent Policy
     id: siem-agent-policy
     namespace: default
     is_managed: false
-    # Perpolicy output and fleet assignment is a Platinum feature
+
+    # Per-policy output requires Platinum license (see note above)
     # data_output_id: es-containerhost
     # monitoring_output_id: es-containerhost
     # fleet_server_host_id: fleet-internal-fleet-server-host
+
     unenroll_timeout: 86400
     inactivity_timeout: 900
     monitoring_enabled:
       - logs
       - metrics
       - traces
+
     package_policies:
+      # System integration - collects host-level data
       - package:
           name: system
         name: Siem Agent System
         id: siem-agent-system
-      # TCP/UDP input settings are configured via Fleet API in setup container
-      # because preconfiguration doesn't support input-type package variables
+
+      # Syslog over TCP - more reliable than UDP (connection-oriented)
+      # TCP ensures delivery with retransmission if packets are lost
+      # NOTE: TCP/UDP input port settings are configured via the Fleet API
+      # after Kibana starts, because preconfiguration doesn't support all
+      # input-type package variables. See docker-compose.4.kibana.yaml
       - package:
           name: tcp
         name: Siem Agent Syslog TCP
         id: siem-agent-syslog-tcp
+
+      # Syslog over UDP - connectionless, lower overhead
+      # UDP is fire-and-forget - no delivery guarantee, but faster
       - package:
           name: udp
         name: Siem Agent Syslog UDP
         id: siem-agent-syslog-udp
 
-# Output settings used by Fleet when configuring Agents
-# Without these Agents wouldnt know where to send data
+# =============================================================================
+# OUTPUTS
+# =============================================================================
+# Outputs define where Elastic Agents send their collected data.
+# Typically this is Elasticsearch, but could also be Logstash.
+#
+# We define two outputs:
+#   1. es-containerhost: For agents running INSIDE Docker (uses internal DNS)
+#   2. es-external: For agents running OUTSIDE Docker (uses external hostname)
+#
+# The external output is set as default because external agents are the
+# primary use case. Internal agents (like Fleet Server) can override this.
+# =============================================================================
 xpack.fleet.outputs:
+  # ---------------------------------------------------------------------------
+  # INTERNAL OUTPUT (Docker network)
+  # ---------------------------------------------------------------------------
+  # Used by agents running inside the Docker network (Fleet Server, SIEM Agent)
+  # Uses container DNS name 'es01' which resolves within Docker network
+  # ---------------------------------------------------------------------------
   - id: es-containerhost
     name: Docker internal output
     type: elasticsearch
     hosts: ["https://es01:9200"]
     config:
       ssl:
+        # Trust our internal CA for container-to-container TLS
         certificate_authorities: ["/certs/ca/ca.crt"]
+
+  # ---------------------------------------------------------------------------
+  # EXTERNAL OUTPUT (Internet-accessible)
+  # ---------------------------------------------------------------------------
+  # Used by agents running outside Docker (on-prem servers, cloud VMs, etc.)
+  # Uses the external domain name which routes through Traefik
+  # ---------------------------------------------------------------------------
   - id: es-external
     name: External Elasticsearch Output
     type: elasticsearch
     hosts: ["https://${ES_DOMAIN_NAME}:${EXTERNAL_ES_PORT}"]
-    is_default: true
-    is_default_monitoring: true
+    is_default: true            # New agents use this by default
+    is_default_monitoring: true # Agent monitoring data goes here too
     config:
       ssl:
-        # Both system CAs and internal CA - works for all modes:
-        # - letsencrypt: validated by system CAs (includes Let's Encrypt roots)
-        # - selfsigned/direct: validated by internal CA
+        # Trust BOTH system CAs and our internal CA
+        # This works for all ingress modes:
+        #   - letsencrypt: Validated by system CAs (Let's Encrypt roots)
+        #   - selfsigned: Validated by our internal CA
+        #   - direct: Validated by our internal CA
         certificate_authorities:
-          - /etc/ssl/certs/ca-bundle.crt
-          - /certs/ca/ca.crt
+          - /etc/ssl/certs/ca-bundle.crt  # System CA bundle
+          - /certs/ca/ca.crt              # Our internal CA
 
-# Fleet Server settings used by Fleet when configuring Agents
-# Without these Agents wouldnt know how to connect to Fleet Server
+# =============================================================================
+# FLEET SERVER HOSTS
+# =============================================================================
+# Fleet Server Hosts tell agents how to connect to Fleet for management.
+# Agents periodically check in with Fleet to get policy updates.
+#
+# Like outputs, we define internal and external options:
+#   1. Internal: For agents inside Docker network
+#   2. External: For agents outside Docker (goes through Traefik)
+# =============================================================================
 xpack.fleet.fleetServerHosts:
+  # ---------------------------------------------------------------------------
+  # INTERNAL FLEET SERVER (Docker network)
+  # ---------------------------------------------------------------------------
+  # Used by agents running inside Docker to connect directly to Fleet Server
+  # ---------------------------------------------------------------------------
   - id: fleet-internal-fleet-server-host
     name: Internal Docker Fleet Server Host
     host_urls: ["https://fleet-server:8220"]
-    is_internal: true
+    is_internal: true  # Mark as internal to hide from external agent enrollment
+
+  # ---------------------------------------------------------------------------
+  # EXTERNAL FLEET SERVER (Internet-accessible)
+  # ---------------------------------------------------------------------------
+  # Used by agents running outside Docker to connect through Traefik
+  # ---------------------------------------------------------------------------
   - id: fleet-external-fleet-server-host
     name: External Fleet Server Host
     host_urls: ["https://${FLEET_DOMAIN_NAME}:${EXTERNAL_FLEET_PORT}"]
-    is_default: true
+    is_default: true  # New enrollments use this by default

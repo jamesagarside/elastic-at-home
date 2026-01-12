@@ -1,6 +1,59 @@
 # Elastic at Home
 
-Protect your home and devices using Elastic Security by deploying Elastic at home
+Protect your home and devices using Elastic Security by deploying Elastic at home.
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Architecture](#architecture)
+- [Overview](#overview)
+- [Certificate Modes](#certificate-modes)
+- [Bill of Materials](#bill-of-materials)
+- [Guide](#guide)
+  - [Prerequisites](#pre-requisites)
+  - [Install Docker](#install-docker--docker-compose)
+  - [Deploy Elastic Cluster](#deploy-elastic-cluster)
+- [Access Your Stack](#access-your-stack)
+- [Project Structure](#project-structure)
+- [Concepts](#concepts)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Quick Start
+
+Get a running Elastic Stack in under 5 minutes (assumes Docker is already installed):
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/jamesagarside/elastic-at-home.git
+cd elastic-at-home
+
+# 2. Create your environment file
+cp .env.example .env
+
+# 3. Edit .env and set your passwords
+#    - ELASTIC_PASSWORD: Your main admin password
+#    - KIBANA_PASSWORD: Internal Kibana password
+#    - INGRESS_MODE: selfsigned (default), letsencrypt, or direct
+
+# 4. Start the stack
+docker compose up -d
+
+# 5. Wait for services to be healthy (~3-5 minutes)
+docker compose ps
+
+# 6. Access Kibana
+#    Self-signed mode: https://kibana.yourdomain.com (or https://<ip>:5601 for direct mode)
+#    Username: elastic
+#    Password: <your ELASTIC_PASSWORD from .env>
+```
+
+> **First time?** Start with `INGRESS_MODE=selfsigned` - it works without any DNS configuration. You'll see browser certificate warnings (click "Advanced" → "Proceed") but everything works.
+
+For detailed instructions, see the [full guide](#guide) below.
+
+---
 
 ## Architecture
 
@@ -19,7 +72,7 @@ What we'll cover in this Guide:
 
 - Configuring host dependencies
 - Installing Docker
-- Deploying and Configuring Traefik along with Letencypt Certificates using Cloudflare DNS Challenge
+- Deploying and Configuring Traefik along with Let's Encrypt Certificates using Cloudflare DNS Challenge
 - Deploying and Configuring an Elastic Stack
 - Installing Elastic Agent for Endpoint Protection
 - Setup Threat Intelligence
@@ -36,21 +89,21 @@ What we'll cover in this Guide:
 
 Elastic at Home supports three certificate modes to accommodate different deployment scenarios—from fully air-gapped environments to internet-connected setups with publicly trusted certificates.
 
-| Mode                         | Use Case                    | Internet Required | Certificate Trust                              |
-| ---------------------------- | --------------------------- | ----------------- | ---------------------------------------------- |
-| **Let's Encrypt**            | Production, external agents | Yes (for ACME)    | Publicly trusted (automatic)                   |
-| **Self-Signed (Hostname)**   | Air-gapped, internal only   | No                | Browser: click through / Agents: CA trust      |
-| **Direct Access (IP:Port)**  | Development, testing        | No                | Browser: click through / Agents: CA trust      |
+| Mode                        | Use Case                    | Internet Required | Certificate Trust                         |
+| --------------------------- | --------------------------- | ----------------- | ----------------------------------------- |
+| **Let's Encrypt**           | Production, external agents | Yes (for ACME)    | Publicly trusted (automatic)              |
+| **Self-Signed (Hostname)**  | Air-gapped, internal only   | No                | Browser: click through / Agents: CA trust |
+| **Direct Access (IP:Port)** | Development, testing        | No                | Browser: click through / Agents: CA trust |
 
 #### Switching Between Modes
 
 Certificate mode is controlled by a single environment variable. The correct Traefik config file is automatically selected based on `INGRESS_MODE`:
 
-| INGRESS_MODE value  | Config file loaded         | Access Method         |
-| ------------------- | -------------------------- | --------------------- |
-| `selfsigned`        | `traefik-selfsigned.yml`   | Hostname via port 443 |
-| `letsencrypt`       | `traefik-letsencrypt.yml`  | Hostname via port 443 |
-| `direct`            | `traefik-direct.yml`       | IP via service ports  |
+| INGRESS_MODE value | Config file loaded        | Access Method         |
+| ------------------ | ------------------------- | --------------------- |
+| `selfsigned`       | `traefik-selfsigned.yml`  | Hostname via port 443 |
+| `letsencrypt`      | `traefik-letsencrypt.yml` | Hostname via port 443 |
+| `direct`           | `traefik-direct.yml`      | IP via service ports  |
 
 ##### Mode-Specific Configuration Architecture
 
@@ -84,16 +137,17 @@ env_file:
 
 Each mode configures different CA certificate paths and validation settings:
 
-| Variable | selfsigned/direct | letsencrypt | Purpose |
-|----------|------------------|-------------|---------|
-| `FLEET_CA` | `/certs/ca/ca.crt` | (unset) | Fleet Server → Elasticsearch CA validation |
-| `ELASTICSEARCH_CA` | `/certs/ca/ca.crt` | (unset) | Agent → Elasticsearch CA validation |
-| `KIBANA_FLEET_CA` | `/certs/ca/ca.crt` | (unset) | Kibana → Fleet Server CA validation |
-| `FLEET_ES_EXTERNAL_CA` | `["/certs/ca/ca.crt"]` | `[]` | Fleet monitoring → External ES output CA (YAML array format) |
+| Variable               | selfsigned/direct      | letsencrypt | Purpose                                                      |
+| ---------------------- | ---------------------- | ----------- | ------------------------------------------------------------ |
+| `FLEET_CA`             | `/certs/ca/ca.crt`     | (unset)     | Fleet Server → Elasticsearch CA validation                   |
+| `ELASTICSEARCH_CA`     | `/certs/ca/ca.crt`     | (unset)     | Agent → Elasticsearch CA validation                          |
+| `KIBANA_FLEET_CA`      | `/certs/ca/ca.crt`     | (unset)     | Kibana → Fleet Server CA validation                          |
+| `FLEET_ES_EXTERNAL_CA` | `["/certs/ca/ca.crt"]` | `[]`        | Fleet monitoring → External ES output CA (YAML array format) |
 
 **Why Different CA Settings Per Mode?**
 
 - **selfsigned/direct modes**: Traefik serves certificates signed by Elasticsearch's CA
+
   - Agents and services need `/certs/ca/ca.crt` to validate these self-signed certificates
   - Without the CA cert, connections fail with "certificate signed by unknown authority"
 
@@ -105,6 +159,7 @@ Each mode configures different CA certificate paths and validation settings:
 **Configuration Example**
 
 `.env.selfsigned`:
+
 ```bash
 FLEET_CA=/certs/ca/ca.crt
 ELASTICSEARCH_CA=/certs/ca/ca.crt
@@ -113,6 +168,7 @@ FLEET_ES_EXTERNAL_CA=["/certs/ca/ca.crt"]
 ```
 
 `.env.letsencrypt`:
+
 ```bash
 # Let's Encrypt mode - uses system CAs, no custom CA needed
 FLEET_ES_EXTERNAL_CA=[]
@@ -121,6 +177,7 @@ FLEET_ES_EXTERNAL_CA=[]
 **When Variables Are Used**
 
 Mode-specific variables are substituted into:
+
 - Fleet configuration: `configurations/elastic/fleet-configuration.yaml`
 - Container environment via `env_file` directive
 - Agent enrollment and communication settings
@@ -250,7 +307,7 @@ docker cp $(docker compose ps -q setup):/certs/ca/ca.crt ./ca.crt
 This guide covers deploying Traefik, a popular reverse proxy technology which includes a bunch of extra functionality including layer 4 (TCP/UDP) routing, Certificate Management and middlewares. In this guide we will use all of this extra functionality with Certificate Management requiring a publically registered domain address. We do this to easily create trust relationships between Clients/Agents and our Elastic Stack, without this we would need to manage and distribute self-signed certificates to anything consuming our Elastic components over TLS or disable certificate authority verification which would reduce the security of the stack.
 
 > [!IMPORTANT]
-> We DO NOT need to expose our Elastic Stack or Traefik to the public internet to be able to use Letsencrypt certificates. [This guide uses DNS challenge](https://doc.traefik.io/traefik/reference/install-configuration/tls/certificate-resolvers/acme/#dnschallenge) to prove owenership/control of the domain through a process called ACME.
+> We DO NOT need to expose our Elastic Stack or Traefik to the public internet to be able to use Letsencrypt certificates. [This guide uses DNS challenge](https://doc.traefik.io/traefik/reference/install-configuration/tls/certificate-resolvers/acme/#dnschallenge) to prove ownership/control of the domain through a process called ACME.
 >
 > Traefik uses LEGO for ACME which supports many DNS Providers to programatically issue Certificates. [The entire list can be found here](https://go-acme.github.io/lego/dns/index.html)
 
@@ -265,7 +322,7 @@ This method does mean that internal DNS records will need to be configured withi
 > **The fix:** Create a placeholder DNS record in your DNS provider (e.g., Cloudflare) for your subdomain. For example, if your services use `*.siem.example.com`, add an A record for `*.siem` pointing to any IP address (e.g., `127.0.0.1`). The actual IP doesn't matter—Lego just needs to find the zone via public DNS. Your local `/etc/hosts` will still handle the actual traffic routing.
 > ![Exanple Cloudflare record](images/screenshots/cloudflare-locahost-record.png)
 
-This guide will use Unifi for providing interal DNS resolution. A wildcard A record is a good way of providing all the Elastic services under a subdomain which mitigates the need to confiugre a new recored each time you add a new service to Traefik.
+This guide will use Unifi for providing internal DNS resolution. A wildcard A record is a good way of providing all the Elastic services under a subdomain which mitigates the need to configure a new record each time you add a new service to Traefik.
 
 ![Unifi Wildcard A-recrod](images/screenshots/internal-dns-record.png)
 
@@ -406,9 +463,9 @@ In this guide we use Cloudflare as our DNS Provider which is supported by Traefi
 ### Install Docker & Docker Compose
 
 > [!TIP]
-> The Offical Docker install instructions can be [found here](https://docs.docker.com/engine/install/linux-postinstall/) if you arent using Debain/RaspOS.
+> The Official Docker install instructions can be [found here](https://docs.docker.com/engine/install/linux-postinstall/) if you aren't using Debian/RaspOS.
 
-1. Add the Ofccial Docker GPG Key & APT repository
+1. Add the Official Docker GPG Key & APT repository
 
    ```bash
    #Add Docker's official GPG key:
@@ -447,7 +504,7 @@ In this guide we use Cloudflare as our DNS Provider which is supported by Traefi
 ### Deploy Elastic Cluster
 
 > [!IMPORTANT]
-> The Offical Elastic guide for deploying an Elastic Stack using Docker Compose can be found here but is slightly out of date and doesnt include Fleet. As part of this guide we will use a modified version of the Offical Guide which brings functionality up to date and adds Fleet & Agent. A PR will be made to update the Offical guide based off this modified verion. [You can find the offical guide here](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-elasticsearch-docker-compose)
+> The Official Elastic guide for deploying an Elastic Stack using Docker Compose can be found here but is slightly out of date and doesn't include Fleet. As part of this guide we will use a modified version of the Official Guide which brings functionality up to date and adds Fleet & Agent. A PR will be made to update the Official guide based off this modified version. [You can find the official guide here](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-elasticsearch-docker-compose)
 
 1. Clone Elastic at Home repository
 
@@ -462,333 +519,318 @@ In this guide we use Cloudflare as our DNS Provider which is supported by Traefi
 
 3. Modify the new .env file: `vi .env`
 
-### Post Deploy Configuration
+   **Required settings:**
 
-#### Update SIEM Agent Policy
+   ```bash
+   # Security credentials (change these!)
+   ELASTIC_PASSWORD=YourSecurePassword123!
+   KIBANA_PASSWORD=AnotherSecurePassword456!
 
-We need to update the SIEM Agent Policy so it the Syslog Integrations bind to `0.0.0.0` allowing Traefik to route TCP/UDP connections to the input, without this the integration is only listening within the container.
+   # Choose your certificate mode
+   INGRESS_MODE=selfsigned  # Options: selfsigned, letsencrypt, direct
 
-1.
+   # Domain names (for selfsigned/letsencrypt modes)
+   ES_DOMAIN_NAME=es.yourdomain.com
+   KIBANA_DOMAIN_NAME=kibana.yourdomain.com
+   FLEET_DOMAIN_NAME=fleet.yourdomain.com
+   ```
 
-# OLD GUIDE
+   > **Tip:** For local testing, use `INGRESS_MODE=direct` to access services via IP:port without DNS.
 
-#### Create `.env` file
+4. Start the Elastic Stack
 
-1.  Update the `.env` file
+   ```bash
+   docker compose up -d
+   ```
 
-2.  Set `ELASTICSEARCH_PASSWORD` to the password you'd like to use as superuser
-3.  Set `KIBANA_PASSWORD` to a random string, this will only be used as a system account by kibana
-4.  Set `STACK_VERSION` to the latest version of Elastic
-5.  Give your cluster a name by setting `CLUSTER_NAME`
-6.  The Offical guide suggests changing `ES_PORT` to only allow for localhost connections which we will do as we will be providing external access to Elasticsearch via a reverse proxy
-7.  Update `KIBANA_PORT` to only expose Kibana on localhost like we did with Elasticsearch 5601 as we will setup Traefik as our reverse proxy later to security expose our cluster. It should look like :
-    ```
-    KIBANA_PORT=127.0.0.1:5601
-    ```
-8.  Add variables for `FLEET_PORT` and `AGENT_PORT` under Kibana Port so we can allow communication from other Agents to Fleet and allow Syslog traffic to the Elastic Agent which will run on this host. These will expose these ports to the wider network using Traefik. The settings should be something like :
+   The first startup takes 3-5 minutes as it:
 
-    ```
-    # Port to expose Fleet to the host
-    FLEET_PORT=127.0.0.1:8220
+   - Generates TLS certificates
+   - Initializes Elasticsearch
+   - Configures Kibana and Fleet
+   - Enrolls the SIEM agent
 
-    # Port to expose Elastic Agent to the host
-    FLEET_PORT=127.0.0.1:5512
-    ```
+5. Verify all services are healthy
 
-9.  Now rename `MEM_LIMIT` to `ES_MEM_LIMIT` and add a new variable named `KB_MEM_LIMIT`. In the Offical guide `MEM_LIMIT` is used for both Elasticsearch and Kibana but here we want the Elasticsearch node to have more memory than Kibana. In this example I'm working off a 16GB Raspberry Pi 5 so I will use 1GB for Kibana and 8GB for Elasticsearch. My settings look like this
+   ```bash
+   docker compose ps
+   ```
 
-    ```
+   All services should show `healthy` status:
 
-    KB_MEM_LIMIT=1073741824
-    ES_MEM_LIMIT=8589934592
+   ```text
+   NAME                            STATUS
+   elastic-at-home-es01-1          Up (healthy)
+   elastic-at-home-kibana-1        Up (healthy)
+   elastic-at-home-fleet-server-1  Up (healthy)
+   elastic-at-home-agent-1         Up
+   elastic-at-home-traefik-1       Up
+   elastic-at-home-setup-1         Up (healthy)
+   ```
 
-    ```
+   > If services show `unhealthy`, check the [Troubleshooting](#troubleshooting) section.
 
-10. Now want to add memory limits for Elastic Agent and Elastic Fleet, we will use 1GB for this guide.
+---
 
-    ```
+## Access Your Stack
 
-        FLEET_MEM_LIMIT=1073741824
-        AGENT_MEM_LIMIT=1073741824
+Once all services are healthy, access your Elastic Stack:
 
-    ```
+### Default Credentials
 
-11. Finally we want to add encryption keys used by Kibana to encrypt various objects within Kibana by adding the following values to the file:
+| Setting      | Value                               |
+| ------------ | ----------------------------------- |
+| **Username** | `elastic`                           |
+| **Password** | Your `ELASTIC_PASSWORD` from `.env` |
 
-    ```
-    # Encryption Keys
-    KB_SECURITY_ENCRYPTIONKEY=<random 32char string>
-    KB_REPORTING_ENCRYPTIONKEY=<random 32char string>
-    KB_OBJECTS_ENCRYPTIONKEY=<random 32char string>
-    ```
+### Access URLs by Mode
 
-    We can do this easily with a single bash command:
+**Self-Signed Mode** (`INGRESS_MODE=selfsigned`):
 
-    ```
-    cat >> .env << EOF
-    # Kibana Encryption Keys
-    KB_SECURITY_ENCRYPTIONKEY=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
-    KB_REPORTING_ENCRYPTIONKEY=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
-    KB_OBJECTS_ENCRYPTIONKEY=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
-    EOF
-    ```
+| Service       | URL                            |
+| ------------- | ------------------------------ |
+| Kibana        | `https://<KIBANA_DOMAIN_NAME>` |
+| Elasticsearch | `https://<ES_DOMAIN_NAME>`     |
+| Fleet         | `https://<FLEET_DOMAIN_NAME>`  |
 
-Overall your .env should look something like:
+> Requires DNS or `/etc/hosts` entries pointing domains to your host IP.
 
-````
+**Let's Encrypt Mode** (`INGRESS_MODE=letsencrypt`):
+Same as self-signed mode, but with publicly trusted certificates (no browser warnings).
 
-# Password for the 'elastic' user (at least 6 characters)
+**Direct Mode** (`INGRESS_MODE=direct`):
 
-ELASTIC_PASSWORD=changeme
+| Service       | URL                      |
+| ------------- | ------------------------ |
+| Kibana        | `https://<host-ip>:5601` |
+| Elasticsearch | `https://<host-ip>:9200` |
+| Fleet         | `https://<host-ip>:8220` |
 
-# Password for the 'kibana_system' user (at least 6 characters)
+> No DNS required - access directly via IP and port.
 
-KIBANA_PASSWORD=changeme
+### First Login
 
-# Version of Elastic products
+1. Navigate to Kibana in your browser
+2. Accept the certificate warning (self-signed/direct modes only)
+3. Log in with username `elastic` and your `ELASTIC_PASSWORD`
+4. You'll land on the Kibana home page - explore **Security** → **Overview** to see your SIEM dashboard
 
-STACK_VERSION=9.2.2
+### Verify Fleet Agent
 
-# Set the cluster name
+1. In Kibana, go to **Management** → **Fleet**
+2. You should see the `siem-agent` enrolled and showing as **Healthy**
+3. The agent is already collecting system logs and metrics
 
-CLUSTER_NAME=elastic-at-home
+---
 
-# Set to 'basic' or 'trial' to automatically start the 30-day trial
+## Project Structure
 
-LICENSE=basic
-#LICENSE=trial
+The stack uses modular Docker Compose files for maintainability and clarity:
 
-# Port to expose Elasticsearch HTTP API to the host
+| File                                  | Purpose                                       |
+| ------------------------------------- | --------------------------------------------- |
+| `docker-compose.yaml`                 | Main orchestrator (includes all module files) |
+| `docker-compose.1.traefik.yaml`       | Reverse proxy & TLS termination               |
+| `docker-compose.2.setup.yaml`         | Certificate generation & initial setup        |
+| `docker-compose.3.elasticsearch.yaml` | Search & analytics engine                     |
+| `docker-compose.4.kibana.yaml`        | Web UI & Fleet configuration                  |
+| `docker-compose.5.fleet.yaml`         | Elastic Agent management                      |
+| `docker-compose.6.agent.yaml`         | SIEM agent & syslog ingestion                 |
 
-ES_PORT=127.0.0.1:9200
-
-# Port to expose Kibana to the host
-
-KIBANA_PORT=127.0.0.1:5601
-
-# Port to expose Fleet to the host
-
-FLEET_PORT=127.0.0.1:8220
-
-# Port to expose Elastic Agent to the host
-
-FLEET_PORT=127.0.0.1:5512
-
-# Increase or decrease based on the available host memory (in bytes)
-
-KB_MEM_LIMIT=1073741824
-ES_MEM_LIMIT=8589934592
-FLEET_MEM_LIMIT=1073741824
-AGENT_MEM_LIMIT=1073741824
-
-# Kibana Encryption Keys
-
-KB_SECURITY_ENCRYPTIONKEY=fRDzAmciu0Sv3c0S8lKxJMrxJbEoEKG1
-KB_REPORTING_ENCRYPTIONKEY=Ih2qXq9iuXdiXg1jo4yXZV8gJWc6stzH
-KB_OBJECTS_ENCRYPTIONKEY=ny6tYXoI3lYrRcpgMSMQAkrSBen8dE9K
+Configuration files are organized in `configurations/`:
 
 ```
-
-#### Configure `docker-compose.yaml`
-
-##### Modify Elastic default configuration
-
-The `docker-compose.yaml` file contains all of the configuration which docker will use to run and configure our Elastic Stack.
-
-We will use the `docker-compose.yaml` file provided in the [Start a multi-node cluster with Docker Compose Elastic Guide](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-elasticsearch-docker-compose) as a base for our Elastic stack with some modifications such as:
-
-- Removing the extra two Elasticsearch nodes. While this might seem counterintuative, "more node mean more better" and all that, as we're running on a single host all extra nodes will do is add latency and unneededly consume resources.
-- Use extra Environment Variables to give more control
-- Further configure Elasticsearch to be production ready as a single node
-- Further configure Kibana to be production ready
-- Add Treafik ingress annotations to Kibana and Elasticsearch to expose them securely within our network.
-- Add Fleet so we can centrally manage Elastic Agents
-- Add an Elastic Agent which will be used for recieving data streamed from our home network devices
-
-> [!NOTE]
-> We will keep the certificate generation for the extra nodes in case case extra nodes wish to be added at a later date
-
-1. Remove the compose `version: "2.2"` at the top of the file as its now deprecated
-2. Remove the `cluster.initial_master_nodes=es01,es02,es03` and the `discovery.seed_hosts=es02,es03` lines within the `es01:environment` section replacing them with `discovery.type=single-node`. The final line should look like
-
+configurations/
+├── elastic/
+│   ├── fleet-configuration.yaml    # Fleet Server & Agent policies
+│   └── env_files/
+│       ├── .env.selfsigned         # Self-signed mode variables
+│       ├── .env.letsencrypt        # Let's Encrypt mode variables
+│       └── .env.direct             # Direct access mode variables
+└── traefik/
+    ├── traefik-selfsigned.yml      # Traefik config for self-signed
+    ├── traefik-letsencrypt.yml     # Traefik config for Let's Encrypt
+    └── traefik-direct.yml          # Traefik config for direct access
 ```
 
-- discovery.type=single-node
+> ⚠️ **Changing Modes Requires Redeployment**
+>
+> The ingress mode is configured into Kibana's Fleet settings at first startup. To switch modes:
+>
+> 1. Stop and remove all containers and volumes: `docker compose down -v`
+> 2. Change `INGRESS_MODE` in your `.env` file
+> 3. Redeploy: `docker compose up -d`
+>
+> Simply changing `INGRESS_MODE` and restarting will not update Fleet's internal configuration.
+> This is a distructive process and will require a brand new Elastic stack
 
+---
+
+## Concepts
+
+This section explains key concepts for those new to SIEM, networking, or Docker.
+
+### What is TLS/SSL?
+
+TLS (Transport Layer Security) encrypts data between your browser/agents and the Elastic Stack. When you see the padlock icon in your browser, TLS is protecting your connection.
+
+**How it works:** Your browser and the server exchange certificates to establish a secure, encrypted channel. Without TLS, anyone on your network could read your passwords and data.
+
+**In Elastic at Home:** All services communicate over HTTPS (HTTP + TLS). Certificates are either:
+
+- **Self-signed:** Generated by Elasticsearch's built-in CA (Certificate Authority)
+- **Let's Encrypt:** Publicly trusted certificates obtained automatically
+
+### What is a Certificate Authority (CA)?
+
+A Certificate Authority is a trusted entity that issues digital certificates. Think of it like a passport office—browsers trust certificates signed by known CAs.
+
+**Why browsers trust Let's Encrypt but not self-signed:**
+
+- Let's Encrypt is a public CA included in every browser's trust store
+- Self-signed certificates are signed by your own CA, which browsers don't recognize
+
+**In Elastic at Home:** In self-signed mode, you'll need to either click through browser warnings or distribute the CA certificate (`ca.crt`) to devices that need to trust your stack.
+
+### What is a Reverse Proxy?
+
+A reverse proxy sits between the internet and your services, routing incoming requests to the correct container. Think of it as a receptionist directing visitors to the right office.
+
+**Benefits:**
+
+- Single entry point (one IP/port for multiple services)
+- TLS termination (handle certificates in one place)
+- Security (hide internal service details)
+
+**In Elastic at Home:** Traefik acts as the reverse proxy, routing requests based on hostname (e.g., `kibana.example.com`) or port (e.g., `:5601`).
+
+### Layer 4 vs Layer 7 Routing
+
+Traefik supports two types of routing:
+
+| Layer       | Protocol   | Use Case                | Example                     |
+| ----------- | ---------- | ----------------------- | --------------------------- |
+| **Layer 4** | TCP/UDP    | Raw connections, syslog | Syslog from routers → Agent |
+| **Layer 7** | HTTP/HTTPS | Web traffic, APIs       | Browser → Kibana            |
+
+**Why it matters:** Syslog uses Layer 4 (TCP/UDP) routing because it's not HTTP traffic. Web services use Layer 7 routing with hostname-based rules.
+
+### What is Syslog?
+
+Syslog is a standard protocol for sending log messages across a network. Most network devices (routers, firewalls, switches) support syslog.
+
+**Protocol options:**
+
+- **UDP (port 514):** Fast, no guaranteed delivery—suitable for high-volume logs
+- **TCP (port 514):** Reliable delivery—better for important security events
+
+**In Elastic at Home:** The Elastic Agent receives syslog messages via Traefik and indexes them into Elasticsearch for analysis.
+
+### What is Fleet?
+
+Fleet is Elastic's centralized agent management system. Instead of configuring each agent individually, you define policies in Fleet and agents automatically receive updates.
+
+**Key concepts:**
+
+- **Agent Policy:** A collection of integrations (data sources) assigned to agents
+- **Integration:** A pre-built data collection module (e.g., System, Syslog, Network)
+- **Enrollment:** The process of connecting an agent to Fleet Server
+
+### Docker Networking
+
+Docker containers run in isolated networks. In Elastic at Home, all containers share a network called `elastic`.
+
+**Internal vs External access:**
+
+- **Internal:** Containers can reach each other by name (e.g., `es01`, `kibana`)
+- **External:** Traffic comes through Traefik on published ports (443, 514)
+
+**Why `es01` works inside Docker:** Docker's internal DNS resolves container names to their IP addresses within the same network.
+
+---
+
+## Troubleshooting
+
+### Container Health Check Failures
+
+**Symptom:** Services show as "unhealthy" in `docker compose ps`
+
+**Debug:**
+
+```bash
+# Check logs for the failing service
+docker compose logs <service-name>
+
+# Check health status details
+docker inspect --format='{{json .State.Health}}' elastic-at-home-<service>-1
 ```
 
-3. Find the sections within the compose file named `es02` and `es03` and completely remove them.
-4. Remove any reference to `es02` and `es03` within the `kibana` section under the `depends_on` key.
-5. Update the `mem_limit` values for `es01` and `kibana` to use the new variables within the `.env` file. They should look like this respectively:
+**Common causes:**
 
+- Insufficient memory (check `docker stats`)
+- Certificate generation still in progress (wait for setup container to complete)
+- Elasticsearch not ready (Kibana/Fleet depend on it)
+
+### Certificate Validation Errors
+
+**Symptom:** "certificate signed by unknown authority" errors
+
+**For self-signed/direct modes:**
+
+1. Extract the CA certificate: `docker cp $(docker compose ps -q setup):/certs/ca/ca.crt ./ca.crt`
+2. Distribute `ca.crt` to agents and configure them to trust it
+3. For browsers: add the CA to your system trust store or click through warnings
+
+**For Let's Encrypt mode:**
+
+- Ensure DNS records point to your host IP
+- Check Traefik logs for ACME errors: `docker compose logs traefik`
+- Verify `CF_DNS_API_TOKEN` has correct permissions
+
+### Fleet Enrollment Issues
+
+**Symptom:** Agents fail to enroll or show as "Offline"
+
+**Debug:**
+
+```bash
+# Check Fleet Server logs
+docker compose logs fleet-server
+
+# Check agent logs
+docker compose logs agent
 ```
 
-# es01
+**Common causes:**
 
-mem_limit: ${ES_MEM_LIMIT}
+- Fleet Server not healthy yet (wait for green health)
+- Incorrect `FLEET_URL` in agent configuration
+- Certificate trust issues (see above)
 
-# kibana
+### Syslog Not Receiving Data
 
-mem_limit: ${KB_MEM_LIMIT}
+**Symptom:** No syslog data appearing in Elasticsearch
 
-```
+**Checklist:**
 
-6. Add the following lines to the `kibana.environment` section.
-```
+1. Verify port 514 is accessible: `nc -zv <host-ip> 514`
+2. Check agent logs for syslog input status
+3. Ensure sending device points to correct IP and port
+4. For TCP: verify `ALLOWED_SYSLOG_IPS` includes your source network
 
-       - XPACK_SECURITY_ENCRYPTIONKEY=${KB_SECURITY_ENCRYPTIONKEY}
-       - XPACK_REPORTING_ENCRYPTIONKEY=${KB_REPORTING_ENCRYPTIONKEY}
-       - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=${KB_OBJECTS_ENCRYPTIONKEY}
+### Memory/Resource Issues
 
-```
-7. Remove the volumes `esdata02` and `esdata03` from the bottom of the `docker-compose.yaml` file.
+**Symptom:** Containers crashing or slow performance
 
-Your final `docker-compose.yaml` should look like this:
+**Solutions:**
 
-```
+- Adjust memory limits in `.env` (KB_MEM_LIMIT, ES_MEM_LIMIT, etc.)
+- Ensure `vm.max_map_count` is set: `sysctl vm.max_map_count`
+- Check total usage: `docker stats`
 
-services:
-setup:
-image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
-    volumes:
-      - certs:/usr/share/elasticsearch/config/certs
-    user: "0"
-    command: >
-      bash -c '
-        if [ x${ELASTIC_PASSWORD} == x ]; then
-echo "Set the ELASTIC_PASSWORD environment variable in the .env file";
-exit 1;
-elif [ x${KIBANA_PASSWORD} == x ]; then
-echo "Set the KIBANA_PASSWORD environment variable in the .env file";
-exit 1;
-fi;
-if [ ! -f config/certs/ca.zip ]; then
-echo "Creating CA";
-bin/elasticsearch-certutil ca --silent --pem -out config/certs/ca.zip;
-unzip config/certs/ca.zip -d config/certs;
-fi;
-if [ ! -f config/certs/certs.zip ]; then
-echo "Creating certs";
-echo -ne \
- "instances:\n"\
- " - name: es01\n"\
- " dns:\n"\
- " - es01\n"\
- " - localhost\n"\
- " ip:\n"\
- " - 127.0.0.1\n"\
- " - name: es02\n"\
- " dns:\n"\
- " - es02\n"\
- " - localhost\n"\
- " ip:\n"\
- " - 127.0.0.1\n"\
- " - name: es03\n"\
- " dns:\n"\
- " - es03\n"\
- " - localhost\n"\
- " ip:\n"\
- " - 127.0.0.1\n"\
+**Recommended minimums:**
 
-> config/certs/instances.yml;
-> bin/elasticsearch-certutil cert --silent --pem -out config/certs/certs.zip --in config/certs/instances.yml --ca-cert config/certs/ca/ca.crt --ca-key config/certs/ca/ca.key;
-> unzip config/certs/certs.zip -d config/certs;
-> fi;
-> echo "Setting file permissions"
-> chown -R root:root config/certs;
-> find . -type d -exec chmod 750 \{\} \;;
-> find . -type f -exec chmod 640 \{\} \;;
-> echo "Waiting for Elasticsearch availability";
-> until curl -s --cacert config/certs/ca/ca.crt https://es01:9200 | grep -q "missing authentication credentials"; do sleep 30; done;
-> echo "Setting kibana_system password";
-> until curl -s -X POST --cacert config/certs/ca/ca.crt -u "elastic:${ELASTIC_PASSWORD}" -H "Content-Type: application/json" https://es01:9200/_security/user/kibana_system/_password -d "{\"password\":\"${KIBANA_PASSWORD}\"}" | grep -q "^{}"; do sleep 10; done;
-> echo "All done!";
-> '
-> healthcheck:
-> test: ["CMD-SHELL", "[ -f config/certs/es01/es01.crt ]"]
-> interval: 1s
-> timeout: 5s
-> retries: 120
-
-es01:
-depends_on:
-setup:
-condition: service_healthy
-image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
-    volumes:
-      - certs:/usr/share/elasticsearch/config/certs
-      - esdata01:/usr/share/elasticsearch/data
-    ports:
-      - ${ES_PORT}:9200
-    environment:
-      - node.name=es01
-      - cluster.name=${CLUSTER_NAME} - discovery.type=single-node - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
-      - bootstrap.memory_lock=true
-      - xpack.security.enabled=true
-      - xpack.security.http.ssl.enabled=true
-      - xpack.security.http.ssl.key=certs/es01/es01.key
-      - xpack.security.http.ssl.certificate=certs/es01/es01.crt
-      - xpack.security.http.ssl.certificate_authorities=certs/ca/ca.crt
-      - xpack.security.transport.ssl.enabled=true
-      - xpack.security.transport.ssl.key=certs/es01/es01.key
-      - xpack.security.transport.ssl.certificate=certs/es01/es01.crt
-      - xpack.security.transport.ssl.certificate_authorities=certs/ca/ca.crt
-      - xpack.security.transport.ssl.verification_mode=certificate
-      - xpack.license.self_generated.type=${LICENSE} - xpack.ml.use_auto_machine_memory_percent=true
-mem_limit: ${ES_MEM_LIMIT}
-ulimits:
-memlock:
-soft: -1
-hard: -1
-healthcheck:
-test:
-[
-"CMD-SHELL",
-"curl -s --cacert config/certs/ca/ca.crt https://localhost:9200 | grep -q 'missing authentication credentials'",
-]
-interval: 10s
-timeout: 10s
-retries: 120
-
-kibana:
-depends_on:
-es01:
-condition: service_healthy
-image: docker.elastic.co/kibana/kibana:${STACK_VERSION}
-    volumes:
-      - certs:/usr/share/kibana/config/certs
-      - kibanadata:/usr/share/kibana/data
-    ports:
-      - ${KIBANA_PORT}:5601
-    environment:
-      - SERVERNAME=kibana
-      - ELASTICSEARCH_HOSTS=https://es01:9200
-      - ELASTICSEARCH_USERNAME=kibana_system
-      - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD} - ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES=config/certs/ca/ca.crt - XPACK_SECURITY_ENCRYPTIONKEY=${KB_SECURITY_ENCRYPTIONKEY}
-      - XPACK_REPORTING_ENCRYPTIONKEY=${KB_REPORTING_ENCRYPTIONKEY} - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=${KB_OBJECTS_ENCRYPTIONKEY}
-mem_limit: ${KB_MEM_LIMIT}
-healthcheck:
-test:
-[
-"CMD-SHELL",
-"curl -s -I http://localhost:5601 | grep -q 'HTTP/1.1 302 Found'",
-]
-interval: 10s
-timeout: 10s
-retries: 120
-
-volumes:
-certs:
-driver: local
-esdata01:
-driver: local
-kibanadata:
-driver: local
-
-```
-
-##### Add Fleet
-
-We will now add Fleet to the compose file. Fleet is used to centrally mange Elastic Agents connected to our cluster handling their policies and health.
-```
-````
+- Elasticsearch: 2GB
+- Kibana: 1GB
+- Fleet Server: 1GB
+- Agent: 512MB

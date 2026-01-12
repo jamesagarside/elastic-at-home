@@ -1,11 +1,40 @@
+# =============================================================================
+# SETUP CONTAINER - Certificate Generation & Initial Configuration
+# =============================================================================
+#
+# This container performs first-time setup tasks:
+#   1. Generates a private Certificate Authority (CA)
+#   2. Creates TLS certificates for each service signed by the CA
+#   3. Sets the kibana_system user password
+#   4. Waits for dependent services to be ready
+#
+# The setup is idempotent - if certificates already exist, it skips generation.
+# Once complete, it creates a .setup_complete marker file and stays running
+# for health checks (other services depend on this container being healthy).
+#
+# =============================================================================
+
 services:
   setup:
+    # Use the Elasticsearch image because it includes elasticsearch-certutil
+    # which is the official tool for generating Elastic Stack certificates
     image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
+
     volumes:
+      # Mount the shared 'certs' volume where all certificates will be stored
+      # This volume is shared with all other services that need TLS
       - certs:/usr/share/elasticsearch/config/certs
+
+    # Run as root (user 0) to ensure we can set correct file permissions
+    # on the certificates (required for Elasticsearch's security requirements)
     user: "0"
+
     networks:
       - elastic
+
+    # Domain names passed in for certificate generation
+    # The Traefik certificate needs all external domain names in its SAN
+    # (Subject Alternative Name) list so browsers trust it for all services
     environment:
       - ES_DOMAIN_NAME=${ES_DOMAIN_NAME}
       - KIBANA_DOMAIN_NAME=${KIBANA_DOMAIN_NAME}
@@ -13,12 +42,24 @@ services:
       - APM_DOMAIN_NAME=${APM_DOMAIN_NAME}
       - TRAEFIK_DOMAIN_NAME=${TRAEFIK_DOMAIN_NAME}
       - TRAEFIK_IP=${TRAEFIK_IP}
+
     command: >
       bash -c '
+        # =====================================================================
+        # IDEMPOTENCY CHECK
+        # If setup was already completed, just stay alive for health checks
+        # This prevents re-running setup on container restarts
+        # =====================================================================
         if [ -f config/certs/.setup_complete ]; then
           echo "Setup already complete, staying alive for health checks";
           tail -f /dev/null;
         fi;
+
+        # =====================================================================
+        # ENVIRONMENT VALIDATION
+        # Ensure required passwords are set before proceeding
+        # The x prefix handles empty variables safely in shell comparison
+        # =====================================================================
         if [ x${ELASTIC_PASSWORD} == x ]; then
           echo "Set the ELASTIC_PASSWORD environment variable in the .env file";
           exit 1;
@@ -26,11 +67,33 @@ services:
           echo "Set the KIBANA_PASSWORD environment variable in the .env file";
           exit 1;
         fi;
+
+        # =====================================================================
+        # STEP 1: CREATE CERTIFICATE AUTHORITY (CA)
+        # The CA is the "root of trust" - all service certificates are signed
+        # by this CA. Services trust each other because they all trust the CA.
+        # Using --pem outputs PEM format files (ca.crt and ca.key)
+        # =====================================================================
         if [ ! -f config/certs/ca.zip ]; then
           echo "Creating CA";
           bin/elasticsearch-certutil ca --silent --pem -out config/certs/ca.zip;
           unzip config/certs/ca.zip -d config/certs;
         fi;
+
+        # =====================================================================
+        # STEP 2: CREATE SERVICE CERTIFICATES
+        # Generate certificates for each service signed by our CA.
+        # The instances.yml file defines which DNS names and IP addresses
+        # each certificate should be valid for (Subject Alternative Names).
+        #
+        # Why multiple DNS entries?
+        #   - Container names (es01, kibana) for internal Docker communication
+        #   - localhost for local testing
+        #   - External domain names for Traefik reverse proxy access
+        #
+        # The Traefik certificate is special - it includes ALL external domains
+        # because Traefik terminates TLS for all incoming HTTPS traffic.
+        # =====================================================================
         if [ ! -f config/certs/certs.zip ]; then
           echo "Creating certs";
           echo -ne \
@@ -74,26 +137,68 @@ services:
           bin/elasticsearch-certutil cert --silent --pem -out config/certs/certs.zip --in config/certs/instances.yml --ca-cert config/certs/ca/ca.crt --ca-key config/certs/ca/ca.key;
           unzip config/certs/certs.zip -d config/certs;
         fi;
+
+        # =====================================================================
+        # STEP 3: SET FILE PERMISSIONS
+        # Elasticsearch requires specific permissions on certificate files:
+        #   - Directories: 750 (owner rwx, group rx, others none)
+        #   - Files: 640 (owner rw, group r, others none)
+        # This prevents unauthorized access to private keys
+        # =====================================================================
         echo "Setting file permissions";
         chown -R root:root config/certs;
         find . -type d -exec chmod 750 \{\} \;;
         find . -type f -exec chmod 640 \{\} \;;
+
+        # =====================================================================
+        # STEP 4: WAIT FOR ELASTICSEARCH
+        # Poll Elasticsearch until it responds. We check for "missing
+        # authentication credentials" message which indicates ES is up and
+        # security is enabled (it rejects our unauthenticated request).
+        # =====================================================================
         echo "Waiting for Elasticsearch availability";
         until curl -s --cacert config/certs/ca/ca.crt https://es01:9200 | grep -q "missing authentication credentials"; do sleep 30; done;
+
+        # =====================================================================
+        # STEP 5: SET KIBANA_SYSTEM PASSWORD
+        # The kibana_system user is a built-in user that Kibana uses to
+        # communicate with Elasticsearch. We set its password here so
+        # Kibana can authenticate when it starts up.
+        # =====================================================================
         echo "Setting kibana_system password";
         until curl -s -X POST --cacert config/certs/ca/ca.crt -u "elastic:${ELASTIC_PASSWORD}" -H "Content-Type: application/json" https://es01:9200/_security/user/kibana_system/_password -d "{\"password\":\"${KIBANA_PASSWORD}\"}" | grep -q "^{}"; do sleep 10; done;
 
+        # =====================================================================
+        # STEP 6: WAIT FOR KIBANA
+        # Wait for Kibana to be fully ready before marking setup complete.
+        # This ensures Fleet configuration can be applied properly.
+        # =====================================================================
         echo "Waiting for Kibana to be ready...";
         until curl -s --cacert config/certs/ca/ca.crt https://kibana:5601/api/status | grep -q "available"; do sleep 10; done;
 
+        # =====================================================================
+        # STEP 7: MARK SETUP COMPLETE
+        # Create marker file so subsequent restarts skip the setup process
+        # =====================================================================
         touch config/certs/.setup_complete;
         echo "All done!";
       '
+
+    # Health check verifies that certificate generation completed successfully
+    # Other services wait for this container to be healthy before starting
+    # The check runs every 1s with 5s timeout, up to 120 retries (2 minutes)
     healthcheck:
       test: ["CMD-SHELL", "[ -f config/certs/es01/es01.crt ]"]
       interval: 1s
       timeout: 5s
       retries: 120
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+# The certs volume is shared across all services that need TLS certificates
+# It's created here and referenced by elasticsearch, kibana, fleet, traefik
+# =============================================================================
 volumes:
   certs:
     driver: local

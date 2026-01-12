@@ -1,45 +1,142 @@
+# =============================================================================
+# SIEM AGENT - Security Data Collector & Syslog Receiver
+# =============================================================================
+#
+# This Elastic Agent runs the SIEM Agent Policy (defined in fleet-configuration.yaml).
+# Its primary purpose is to receive syslog messages from network devices and
+# forward them to Elasticsearch for security analysis.
+#
+# WHAT IS SYSLOG?
+#   Syslog is a standard protocol for sending log messages over a network.
+#   Network devices (firewalls, routers, switches, servers) use syslog to
+#   send their logs to a central collector. This agent acts as that collector.
+#
+# TRAFFIC FLOW:
+#   Network Device → Traefik (port 514) → Agent (port 8080) → Elasticsearch
+#
+# WHY TWO PORTS?
+#   - Port 514: Standard syslog port exposed externally via Traefik
+#   - Port 8080: Internal port the agent listens on (Traefik forwards to this)
+#
+# =============================================================================
+
 services:
   agent:
+    # Hostname used for identification in logs and Fleet UI
     hostname: siem-agent
+
+    # Wait for Fleet Server to be ready before starting
+    # The agent needs Fleet Server to get its configuration
     depends_on:
       fleet-server:
         condition: service_healthy
+
     image: docker.elastic.co/elastic-agent/elastic-agent:${STACK_VERSION}
+
     volumes:
+      # Access to certificates for TLS connections to Fleet and Elasticsearch
       - certs:/certs
+      # Persistent storage for agent state (enrollment info, cache, etc.)
       - agentdata:/usr/share/elastic-agent
+
     networks:
       - elastic
+
+    # Run as root to allow binding to privileged ports and accessing logs
     user: root
-    # Map external domains to Docker host so agent can reach Traefik
+
+    # -------------------------------------------------------------------------
+    # EXTRA HOSTS - Resolve External Domains to Docker Host
+    # -------------------------------------------------------------------------
+    # The agent needs to reach Fleet and Elasticsearch via their external URLs
+    # (for consistency with how external agents connect). These mappings make
+    # the external domain names resolve to the Docker host, where Traefik
+    # handles the routing.
+    #
+    # 'host-gateway' is a special Docker value that resolves to the host IP.
+    # -------------------------------------------------------------------------
     extra_hosts:
       - "${ES_DOMAIN_NAME}:host-gateway"
       - "${FLEET_DOMAIN_NAME}:host-gateway"
       - "${KIBANA_DOMAIN_NAME}:host-gateway"
+
+    # Mode-specific environment variables (TLS settings vary by ingress mode)
     env_file:
       - configurations/elastic/env_files/.env.${INGRESS_MODE:-selfsigned}
+
     environment:
-      # Fleet enrollment - FLEET_URL and KIBANA_HOST set in mode-specific env_file
+      # -----------------------------------------------------------------------
+      # FLEET ENROLLMENT
+      # -----------------------------------------------------------------------
+      # These settings tell the agent how to enroll with Fleet Server.
+      # On first start, the agent contacts Fleet, proves its identity, and
+      # receives its policy configuration.
+      # -----------------------------------------------------------------------
+
+      # Enable automatic enrollment (vs manual with enrollment tokens)
       - FLEET_ENROLL=1
+
+      # Credentials for initial enrollment API call
       - KIBANA_FLEET_USERNAME=elastic
       - KIBANA_FLEET_PASSWORD=${ELASTIC_PASSWORD}
+
+      # Which policy to enroll under - must match name in fleet-configuration.yaml
       - FLEET_TOKEN_POLICY_NAME=SIEM Agent Policy
+
+      # Fleet Server URL - where agent connects for management
+      # Uses external URL which routes through Traefik (via extra_hosts above)
       - FLEET_URL=https://${FLEET_DOMAIN_NAME:-fleet-server:8220}
+
+      # Kibana URL - used during enrollment to register with Fleet
       - KIBANA_HOST=https://${KIBANA_DOMAIN_NAME:-kibana:5601}
+
+    # -------------------------------------------------------------------------
+    # TRAEFIK LABELS - Syslog Routing
+    # -------------------------------------------------------------------------
+    # These labels configure Traefik to route syslog traffic to this agent.
+    # Syslog uses Layer 4 routing (TCP/UDP) rather than HTTP.
+    # -------------------------------------------------------------------------
     labels:
       - "traefik.enable=true"
-      # TCP Router for syslog over TCP (restricted by source IP)
+
+      # ---------------------------------------------------------------------
+      # TCP SYSLOG (Reliable Delivery)
+      # ---------------------------------------------------------------------
+      # TCP provides reliable delivery - if a packet is lost, it's retransmitted.
+      # Use TCP when you can't afford to lose log messages.
+      #
+      # ClientIP rule restricts which source IPs can send syslog.
+      # This is a security measure - you don't want random internet hosts
+      # flooding your syslog receiver.
+      # ---------------------------------------------------------------------
       - "traefik.tcp.routers.agent-tcp.rule=ClientIP(`${ALLOWED_SYSLOG_IPS}`)"
       - "traefik.tcp.routers.agent-tcp.entrypoints=syslog-tcp"
       - "traefik.tcp.routers.agent-tcp.service=agent-tcp"
       - "traefik.tcp.services.agent-tcp.loadbalancer.server.port=8080"
-      # UDP Router for syslog over UDP
-      # Only enable this if you need to as Traefik UDP routers dont support rules
-      # so we cant filter based on Source IP.
+
+      # ---------------------------------------------------------------------
+      # UDP SYSLOG (Best Effort Delivery)
+      # ---------------------------------------------------------------------
+      # UDP is fire-and-forget - faster but no delivery guarantee.
+      # Many devices only support UDP syslog.
+      #
+      # WARNING: Traefik UDP routers don't support rules (like ClientIP),
+      # so UDP syslog is open to any source. Only enable if you need it
+      # and have other network-level restrictions (firewall, VLAN, etc.).
+      # ---------------------------------------------------------------------
       - "traefik.udp.routers.agent-udp.entrypoints=syslog-udp"
       - "traefik.udp.routers.agent-udp.service=agent-udp"
       - "traefik.udp.services.agent-udp.loadbalancer.server.port=8080"
+
+    # Memory limit for the agent container
     mem_limit: ${AGENT_MEM_LIMIT}
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+# agentdata stores enrollment state and local caches.
+# If you delete this volume, the agent will need to re-enroll with Fleet.
+# =============================================================================
 volumes:
   agentdata:
     driver: local

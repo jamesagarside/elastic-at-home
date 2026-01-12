@@ -1,18 +1,64 @@
-# Dynamic Configuration - Let's Encrypt Mode
-# Contains serversTransports only (ACME handles certificates)
+# =============================================================================
+# TRAEFIK DYNAMIC CONFIGURATION - Let's Encrypt Mode
+# =============================================================================
+#
+# This file provides Traefik's dynamic configuration for Let's Encrypt mode.
+# Dynamic configuration can be changed without restarting Traefik.
+#
+# WHY LET'S ENCRYPT MODE?
+#   Let's Encrypt provides free, publicly-trusted TLS certificates.
+#   Benefits:
+#   - No browser warnings (certificates trusted by default)
+#   - Automatic renewal (Traefik handles this via ACME)
+#   - Industry-standard security
+#
+#   Requirements:
+#   - Public DNS records pointing to your host
+#   - Cloudflare DNS API token (for DNS-01 challenge)
+#   - Internet connectivity for ACME protocol
+#
+# HOW IT WORKS:
+#   1. Traefik requests a certificate from Let's Encrypt for your domains
+#   2. Let's Encrypt issues a challenge to verify you own the domain
+#   3. Traefik responds via DNS-01 (creates a DNS TXT record via Cloudflare API)
+#   4. Let's Encrypt verifies the TXT record and issues the certificate
+#   5. Traefik automatically renews before expiration (every ~60 days)
+#
+# NOTE ON THIS FILE:
+#   Unlike self-signed mode, we don't define TLS certificates here because
+#   ACME handles certificate management automatically. We only need to define
+#   serversTransports for backend connections.
+#
+# =============================================================================
 
+# =============================================================================
+# SERVERS TRANSPORTS
+# =============================================================================
+# Even though clients get Let's Encrypt certificates, the BACKEND services
+# (Elasticsearch, Kibana, Fleet) still use internal self-signed certificates.
+# Traefik terminates the public TLS and establishes a new connection to backends.
+#
+# Traffic flow:
+#   Client ──[Let's Encrypt cert]──► Traefik ──[Internal cert]──► Backend
+#
+# Traefik must trust our internal CA to verify backend certificates.
+# =============================================================================
 http:
   serversTransports:
+    # Transport for connecting to Elasticsearch
+    # serverName must match the certificate's CN/SAN (container name: es01)
     es-transport:
       serverName: "es01"
       rootCAs:
-        - /certs/ca/ca.crt
+        - /certs/ca/ca.crt      # Trust internal CA for backend connection
 
+    # Transport for connecting to Kibana
     kibana-transport:
       serverName: "kibana"
       rootCAs:
         - /certs/ca/ca.crt
 
+    # Transport for connecting to Fleet Server
     fleet-transport:
       serverName: "fleet-server"
       rootCAs:

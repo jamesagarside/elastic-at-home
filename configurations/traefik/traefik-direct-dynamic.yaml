@@ -1,82 +1,167 @@
-# Dynamic Configuration - Direct Access Mode
-# Contains TLS certificates, serversTransports, and port-based routers/services
+# =============================================================================
+# TRAEFIK DYNAMIC CONFIGURATION - Direct Access Mode
+# =============================================================================
+#
+# This file provides Traefik's dynamic configuration for direct access mode.
+# Dynamic configuration can be changed without restarting Traefik.
+#
+# WHAT IS DIRECT MODE?
+#   Direct mode uses port-based routing instead of hostname-based routing.
+#   Each service gets its own port:
+#     - Elasticsearch: port 9200
+#     - Kibana: port 5601
+#     - Fleet: port 8220
+#     - APM: port 8200
+#
+# WHY USE DIRECT MODE?
+#   - No DNS configuration required (access via IP:port)
+#   - Simpler for single-machine setups
+#   - Useful when you can't modify /etc/hosts or DNS
+#   - Compatible with tools that expect standard Elastic ports
+#
+#   Trade-offs:
+#   - More ports to expose/manage
+#   - Self-signed certificates (browser warnings)
+#   - Less flexible than hostname routing
+#
+# HOW IT WORKS:
+#   Unlike hostname-based modes, direct mode defines routes in this file
+#   rather than via Docker labels. Each service has a dedicated entrypoint
+#   (port) and all requests to that port route to the corresponding backend.
+#
+# =============================================================================
 
+# =============================================================================
+# TLS CERTIFICATES
+# =============================================================================
+# In direct mode, we provide our self-signed certificate for all HTTPS ports.
+# The defaultCertificate is used for any connection that doesn't match a
+# specific certificate configuration.
+# =============================================================================
 tls:
   certificates:
+    # Primary certificate for all services
     - certFile: /certs/traefik/traefik.crt
       keyFile: /certs/traefik/traefik.key
+
   stores:
     default:
+      # Default certificate used when no specific match is found
+      # This ensures all HTTPS ports use our certificate
       defaultCertificate:
         certFile: /certs/traefik/traefik.crt
         keyFile: /certs/traefik/traefik.key
 
+# =============================================================================
+# HTTP ROUTERS AND SERVICES
+# =============================================================================
+# In direct mode, we define explicit routers and services for each backend.
+# This is different from hostname modes where Docker labels configure routing.
+#
+# Router: Matches incoming requests and directs them to a service
+# Service: Defines the backend server(s) to forward requests to
+# =============================================================================
 http:
   routers:
+    # -------------------------------------------------------------------------
+    # ELASTICSEARCH ROUTER (port 9200)
+    # -------------------------------------------------------------------------
+    # Routes all requests on the elasticsearch entrypoint to ES backend
+    # PathPrefix(`/`) matches everything - port already determines the service
+    # -------------------------------------------------------------------------
     es-direct:
       rule: "PathPrefix(`/`)"
       entryPoints:
-        - elasticsearch
+        - elasticsearch           # Listens on port 9200
       service: es-service
-      tls: {}
+      tls: {}                     # Enable TLS with default certificate
 
+    # -------------------------------------------------------------------------
+    # KIBANA ROUTER (port 5601)
+    # -------------------------------------------------------------------------
     kibana-direct:
       rule: "PathPrefix(`/`)"
       entryPoints:
-        - kibana
+        - kibana                  # Listens on port 5601
       service: kibana-service
       tls: {}
 
+    # -------------------------------------------------------------------------
+    # FLEET SERVER ROUTER (port 8220)
+    # -------------------------------------------------------------------------
     fleet-direct:
       rule: "PathPrefix(`/`)"
       entryPoints:
-        - fleet
+        - fleet                   # Listens on port 8220
       service: fleet-service
       tls: {}
 
+    # -------------------------------------------------------------------------
+    # APM ROUTER (port 8200)
+    # -------------------------------------------------------------------------
     apm-direct:
       rule: "PathPrefix(`/`)"
       entryPoints:
-        - apm
+        - apm                     # Listens on port 8200
       service: apm-service
       tls: {}
 
+  # ---------------------------------------------------------------------------
+  # SERVICES - Backend Server Definitions
+  # ---------------------------------------------------------------------------
+  # Each service defines where to forward requests and how to connect.
+  # loadBalancer is required even for single backends (Traefik's architecture).
+  # serversTransport tells Traefik how to verify the backend's TLS certificate.
+  # ---------------------------------------------------------------------------
   services:
+    # Elasticsearch backend
     es-service:
       loadBalancer:
         servers:
-          - url: "https://es01:9200"
-        serversTransport: es-transport
+          - url: "https://es01:9200"        # Backend URL (container DNS name)
+        serversTransport: es-transport       # Use es-transport for TLS verification
 
+    # Kibana backend
     kibana-service:
       loadBalancer:
         servers:
           - url: "https://kibana:5601"
         serversTransport: kibana-transport
 
+    # Fleet Server backend
     fleet-service:
       loadBalancer:
         servers:
           - url: "https://fleet-server:8220"
         serversTransport: fleet-transport
 
+    # APM backend (runs on Fleet Server container, different port)
     apm-service:
       loadBalancer:
         servers:
           - url: "https://fleet-server:8200"
-        serversTransport: fleet-transport
+        serversTransport: fleet-transport   # Same transport - same container
 
+  # ---------------------------------------------------------------------------
+  # SERVERS TRANSPORTS
+  # ---------------------------------------------------------------------------
+  # Define how Traefik verifies backend TLS certificates.
+  # Same configuration as other modes - backends always use internal certs.
+  # ---------------------------------------------------------------------------
   serversTransports:
+    # Transport for Elasticsearch connections
     es-transport:
-      serverName: "es01"
+      serverName: "es01"                    # Must match certificate's CN/SAN
       rootCAs:
-        - /certs/ca/ca.crt
+        - /certs/ca/ca.crt                  # Trust internal CA
 
+    # Transport for Kibana connections
     kibana-transport:
       serverName: "kibana"
       rootCAs:
         - /certs/ca/ca.crt
 
+    # Transport for Fleet Server connections (also used for APM)
     fleet-transport:
       serverName: "fleet-server"
       rootCAs:

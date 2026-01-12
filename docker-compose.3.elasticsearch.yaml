@@ -1,47 +1,157 @@
+# =============================================================================
+# ELASTICSEARCH - Search & Analytics Engine
+# =============================================================================
+#
+# Elasticsearch is the heart of the Elastic Stack. It stores, indexes, and
+# searches all your data. Everything else (Kibana, Fleet, Agents) either
+# queries Elasticsearch or sends data to it.
+#
+# This configuration runs a single-node cluster suitable for home/lab use.
+# Production deployments would use multiple nodes for high availability.
+#
+# KEY CONCEPTS:
+#   - Index: A collection of documents (like a database table)
+#   - Document: A JSON object stored in an index (like a row)
+#   - Cluster: One or more nodes working together
+#   - Node: A single Elasticsearch instance
+#
+# =============================================================================
+
 services:
   es01:
+    # Wait for setup container to generate certificates first
     depends_on:
       setup:
         condition: service_healthy
+
     image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
+
     volumes:
+      # Shared certificate volume (read-only access to certs)
       - certs:/usr/share/elasticsearch/config/certs
+      # Persistent data volume - survives container restarts
       - esdata01:/usr/share/elasticsearch/data
+
     networks:
       - elastic
+
+    # -------------------------------------------------------------------------
+    # ELASTICSEARCH CONFIGURATION
+    # -------------------------------------------------------------------------
+    # These environment variables configure Elasticsearch behavior.
+    # They map to elasticsearch.yml settings but are easier to manage in Docker.
+    # -------------------------------------------------------------------------
     environment:
+      # Node identity within the cluster
       - node.name=es01
       - cluster.name=${CLUSTER_NAME}
+
+      # Single-node discovery - no cluster coordination needed
+      # For multi-node clusters, you'd use discovery.seed_hosts and
+      # cluster.initial_master_nodes instead
       - discovery.type=single-node
+
+      # Bootstrap password for the built-in 'elastic' superuser
+      # This is only used on first startup to initialize the user
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+
+      # -----------------------------------------------------------------------
+      # MEMORY LOCKING
+      # -----------------------------------------------------------------------
+      # Prevents Elasticsearch memory from being swapped to disk.
+      # Swapping is disastrous for ES performance - it causes pauses and
+      # can make the node appear unresponsive to the cluster.
+      # -----------------------------------------------------------------------
       - bootstrap.memory_lock=true
+
+      # -----------------------------------------------------------------------
+      # SECURITY CONFIGURATION
+      # -----------------------------------------------------------------------
+      # X-Pack Security enables authentication, authorization, and encryption.
+      # All production deployments should have security enabled.
+      # -----------------------------------------------------------------------
       - xpack.security.enabled=true
+
+      # HTTP TLS - encrypts client connections (Kibana, curl, applications)
       - xpack.security.http.ssl.enabled=true
       - xpack.security.http.ssl.key=certs/es01/es01.key
       - xpack.security.http.ssl.certificate=certs/es01/es01.crt
       - xpack.security.http.ssl.certificate_authorities=certs/ca/ca.crt
+
+      # Transport TLS - encrypts node-to-node communication
+      # Even single-node clusters should enable this for consistency
       - xpack.security.transport.ssl.enabled=true
       - xpack.security.transport.ssl.key=certs/es01/es01.key
       - xpack.security.transport.ssl.certificate=certs/es01/es01.crt
       - xpack.security.transport.ssl.certificate_authorities=certs/ca/ca.crt
+
+      # Certificate verification mode for transport layer
+      # 'certificate' verifies the cert is valid and signed by our CA
+      # 'full' would also verify the hostname matches (stricter)
       - xpack.security.transport.ssl.verification_mode=certificate
+
+      # License type - 'basic' is free, 'trial' enables all features for 30 days
       - xpack.license.self_generated.type=${LICENSE}
+
+      # Let Elasticsearch auto-tune ML memory based on available system memory
       - xpack.ml.use_auto_machine_memory_percent=true
+
+    # -------------------------------------------------------------------------
+    # TRAEFIK LABELS
+    # -------------------------------------------------------------------------
+    # These labels configure how Traefik routes traffic to Elasticsearch.
+    # Traefik reads these labels to dynamically configure routing rules.
+    # -------------------------------------------------------------------------
     labels:
       - "traefik.enable=true"
+
+      # Route requests for ES_DOMAIN_NAME to this service
+      # Example: https://es.example.com → es01:9200
       - "traefik.http.routers.es.rule=Host(`${ES_DOMAIN_NAME}`)"
+
+      # Use the HTTPS entrypoint (port 443)
       - "traefik.http.routers.es.entrypoints=websecure"
+
+      # Enable TLS for this route
       - "traefik.http.routers.es.tls=true"
+
+      # Certificate resolver - determines how TLS certificates are obtained
+      # Empty string = use self-signed certs from file provider
+      # 'letsencrypt' = use Let's Encrypt ACME
       - "traefik.http.routers.es.tls.certresolver=${INGRESS_MODE:-}"
+
+      # Backend service configuration
       - "traefik.http.services.es.loadbalancer.server.port=9200"
       - "traefik.http.services.es.loadbalancer.server.scheme=https"
-      # Reference serversTransport from file provider for TLS verification
+
+      # Use custom serversTransport for backend TLS verification
+      # This tells Traefik to trust our internal CA when connecting to ES
+      # The transport is defined in traefik-*-dynamic.yaml files
       - "traefik.http.services.es.loadbalancer.serversTransport=es-transport@file"
+
+    # Memory limit for the container
     mem_limit: ${ES_MEM_LIMIT}
+
+    # -------------------------------------------------------------------------
+    # ULIMITS - Memory Locking Requirements
+    # -------------------------------------------------------------------------
+    # For bootstrap.memory_lock=true to work, the container needs permission
+    # to lock unlimited memory. These ulimits remove the default restrictions.
+    # -1 means unlimited.
+    # -------------------------------------------------------------------------
     ulimits:
       memlock:
         soft: -1
         hard: -1
+
+    # -------------------------------------------------------------------------
+    # HEALTH CHECK
+    # -------------------------------------------------------------------------
+    # Checks if Elasticsearch is responding to HTTP requests.
+    # We check for "missing authentication credentials" error which indicates:
+    #   1. ES is running and accepting connections
+    #   2. Security is enabled (it's rejecting our unauthenticated request)
+    # -------------------------------------------------------------------------
     healthcheck:
       test:
         [
@@ -50,8 +160,14 @@ services:
         ]
       interval: 10s
       timeout: 10s
-      retries: 120
+      retries: 120  # Allow up to 20 minutes for ES to start
 
+# =============================================================================
+# VOLUMES
+# =============================================================================
+# esdata01 stores Elasticsearch indices and cluster state.
+# IMPORTANT: This volume contains all your indexed data. Back it up!
+# =============================================================================
 volumes:
   esdata01:
     driver: local
