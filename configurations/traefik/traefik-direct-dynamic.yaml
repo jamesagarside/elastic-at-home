@@ -106,6 +106,17 @@ http:
       service: apm-service
       tls: {}
 
+    # -------------------------------------------------------------------------
+    # OLLAMA ROUTER (port 11434) - Optional LLM API
+    # Only active when Ollama container is running (llm-ingress profile)
+    # -------------------------------------------------------------------------
+    ollama-direct:
+      rule: "PathPrefix(`/`)"
+      entryPoints:
+        - ollama                  # Listens on port 11434
+      service: ollama-service
+      tls: {}
+
   # ---------------------------------------------------------------------------
   # SERVICES - Backend Server Definitions
   # ---------------------------------------------------------------------------
@@ -141,6 +152,12 @@ http:
         servers:
           - url: "https://fleet-server:8200"
         serversTransport: fleet-transport   # Same transport - same container
+
+    # Ollama backend (plain HTTP — no TLS on backend)
+    ollama-service:
+      loadBalancer:
+        servers:
+          - url: "http://ollama:11434"
 
   # ---------------------------------------------------------------------------
   # SERVERS TRANSPORTS

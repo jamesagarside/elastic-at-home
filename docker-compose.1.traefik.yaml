@@ -40,6 +40,8 @@ services:
       - "5601:5601"
       - "8220:8220"
       - "8200:8200"
+      # Ollama LLM API (used when INGRESS_MODE=direct and llm-ingress profile active)
+      - "11434:11434"
     environment:
       - CF_DNS_API_TOKEN=${CF_DNS_API_TOKEN}
       # ACME email for Let's Encrypt (only used when INGRESS_MODE=letsencrypt)

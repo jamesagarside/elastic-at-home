@@ -63,3 +63,8 @@ http:
       serverName: "fleet-server"
       rootCAs:
         - /certs/ca/ca.crt
+
+    # Transport for connecting to Ollama (plain HTTP — no TLS verification needed)
+    # Ollama does not support TLS natively; traffic is within the Docker network
+    ollama-transport:
+      serverName: "ollama"

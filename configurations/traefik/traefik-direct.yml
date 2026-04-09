@@ -42,6 +42,9 @@ entryPoints:
     address: ":8220"
   apm:
     address: ":8200"
+  # Ollama LLM API (optional — only used when llm-ingress profile is active)
+  ollama:
+    address: ":11434"
   # Syslog entrypoints
   syslog-tcp:
     address: ":514"

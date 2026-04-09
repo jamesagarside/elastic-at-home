@@ -130,7 +130,7 @@ services:
       - "traefik.http.services.es.loadbalancer.serversTransport=es-transport@file"
 
     # Memory limit for the container
-    mem_limit: ${ES_MEM_LIMIT}
+    mem_limit: ${ES_MEM_LIMIT:-4294967296}
 
     # -------------------------------------------------------------------------
     # ULIMITS - Memory Locking Requirements

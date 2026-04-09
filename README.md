@@ -14,6 +14,7 @@ Protect your home and devices using Elastic Security by deploying Elastic at hom
   - [Install Docker](#install-docker--docker-compose)
   - [Deploy Elastic Cluster](#deploy-elastic-cluster)
 - [Access Your Stack](#access-your-stack)
+- [Local LLM (Optional)](#local-llm-optional)
 - [Project Structure](#project-structure)
 - [Concepts](#concepts)
 - [Troubleshooting](#troubleshooting)
@@ -81,9 +82,11 @@ What we'll cover in this Guide:
 
 > [!IMPORTANT]
 > The following require a licence but can be used for 30 days with a trial licence.
+> When [Local LLM](#local-llm-optional) is enabled, the trial is activated automatically.
 
 - Setting up anomaly detection for Network Traffic and DNS
 - Configure Alerting via Slack
+- Kibana AI Assistant (via GenAI connector — see [Local LLM](#local-llm-optional))
 
 ### Certificate Modes
 
@@ -618,6 +621,149 @@ Same as self-signed mode, but with publicly trusted certificates (no browser war
 
 ---
 
+## Local LLM (Optional)
+
+The stack includes optional support for a local Large Language Model via [Ollama](https://ollama.com), serving Google [Gemma 4 E2B](https://deepmind.google/models/gemma/gemma-4/) (2B parameters). This enables Elasticsearch's AI features — AI Assistant, semantic search, and inference pipelines — without sending data to external providers.
+
+> [!IMPORTANT]
+> **Trial License (30-day limit):** When the LLM is enabled, the setup container automatically activates an Elasticsearch **trial license**. This is required because GenAI connectors (which wire Kibana AI Assistant to the local model) are an Enterprise feature. The trial provides full Enterprise functionality free for **30 days**. After the trial expires, the cluster downgrades to Basic and the following features will **stop working**:
+>
+> | Feature | Status after trial expires |
+> | ------- | ------------------------- |
+> | Kibana AI Assistant (GenAI connector) | Disabled |
+> | Machine Learning anomaly detection | Disabled |
+> | Watcher / Advanced alerting | Disabled |
+> | Graph exploration | Disabled |
+> | Field-level & document-level security | Disabled |
+>
+> **Features that continue working on Basic license:**
+> - Elastic Security SIEM (detection rules, alerts, timelines)
+> - Fleet & Elastic Agent management
+> - Elasticsearch search & aggregations
+> - Kibana dashboards & visualisations
+> - Ollama container & inference endpoint (direct API use)
+> - Syslog ingestion
+>
+> To continue using Enterprise features after 30 days, you will need a paid Elastic license. See the [Elastic subscriptions page](https://www.elastic.co/subscriptions) for options.
+
+### Hardware Requirements
+
+Gemma 4 E2B requires ~7.2 GB of RAM at runtime. With the LLM enabled, the recommended memory allocation for a **16 GB host** is:
+
+| Service | RAM |
+| ------- | --- |
+| Elasticsearch | 4 GB |
+| Ollama (Gemma 4 E2B) | 8 GB |
+| Kibana | 1 GB |
+| Fleet Server | 1 GB |
+| Agent | 1 GB |
+| **Total** | **~15 GB** |
+
+| Resource | Requirement |
+| -------- | ----------- |
+| Host RAM | 16 GB recommended |
+| Disk | 2 GB (model download) |
+| GPU | Not required (CPU inference) |
+
+> [!NOTE]
+> When enabling the LLM, reduce `ES_MEM_LIMIT` to `4294967296` (4 GB) in your `.env` to free memory for Ollama. The default without LLM is 8 GB.
+
+### Enable the LLM
+
+Set the following in your `.env` file:
+
+```bash
+ENABLE_LLM=true
+ES_MEM_LIMIT=4294967296    # Reduce ES to 4GB to make room for Ollama
+LLM_MEM_LIMIT=8589934592   # 8GB for Ollama (Gemma 4 E2B needs ~7.2GB)
+LLM_API_KEY=               # Optional: set an API key for Ollama authentication
+```
+
+Then start the stack as normal:
+
+```bash
+docker compose up -d
+```
+
+On first start, the model is downloaded from the Ollama registry (~1.5 GB). Subsequent starts use the cached model.
+
+### What Gets Configured
+
+When `ENABLE_LLM=true`, the setup container automatically configures everything:
+
+1. **Ollama container** starts and pulls the configured model
+2. **Elasticsearch inference endpoint** (`local-llm`) is created, pointing at Ollama's OpenAI-compatible API
+3. **Trial license** is activated to enable Enterprise features (required for GenAI connectors)
+4. **Kibana GenAI connector** (`Local LLM (Ollama)`) is created so the AI Assistant can use the local model
+5. **Kibana AI Assistant** is ready to use for chat, analysis, and investigation assistance
+
+If `LLM_API_KEY` is set in your `.env`, it is used for both the Elasticsearch inference endpoint and the Kibana connector, and passed to Ollama as `OLLAMA_API_KEY` for authentication.
+
+> [!TIP]
+> **Redeployment-safe:** The setup container uses a two-phase design. Certificate generation (Phase 1) is skipped if certs already exist in the volume, but post-startup configuration — passwords, trial license, inference endpoint, and GenAI connector — runs on every startup. This means you can remove data volumes and redeploy without losing certificates or needing to re-issue Let's Encrypt certs.
+
+### Verify It's Working
+
+```bash
+# Check Ollama is healthy
+docker compose ps ollama
+
+# Check the inference endpoint exists
+curl -s --cacert ./ca.crt -u elastic:$ELASTIC_PASSWORD \
+  https://<ES_DOMAIN_NAME>/_inference/completion/local-llm | jq
+
+# Test a completion
+curl -s --cacert ./ca.crt -u elastic:$ELASTIC_PASSWORD \
+  -H "Content-Type: application/json" \
+  https://<ES_DOMAIN_NAME>/_inference/completion/local-llm \
+  -d '{"input":"What is Elasticsearch?"}' | jq
+
+# Verify the GenAI connector exists in Kibana
+curl -s --cacert ./ca.crt -u elastic:$ELASTIC_PASSWORD \
+  -H "kbn-xsrf: true" \
+  https://<KIBANA_DOMAIN_NAME>/api/actions/connectors \
+  | jq '.[] | select(.connector_type_id == ".gen-ai")'
+
+# Check trial license status
+curl -s --cacert ./ca.crt -u elastic:$ELASTIC_PASSWORD \
+  https://<ES_DOMAIN_NAME>/_license | jq '.license | {type, status, expiry_date}'
+```
+
+### Network Access (Optional)
+
+To access the LLM API from other devices on your network (e.g., for use with other applications), also set `ENABLE_LLM_INGRESS=true`:
+
+```bash
+# In .env
+ENABLE_LLM=true
+ENABLE_LLM_INGRESS=true
+LLM_DOMAIN_NAME=llm.example.com
+```
+
+Remember to add the `LLM_DOMAIN_NAME` to your DNS or `/etc/hosts` (selfsigned mode).
+
+**Access URLs by mode:**
+
+| Mode | URL |
+| ---- | --- |
+| Self-Signed | `https://<LLM_DOMAIN_NAME>` |
+| Let's Encrypt | `https://<LLM_DOMAIN_NAME>` |
+| Direct | `https://<host-ip>:11434` |
+
+The Ollama API is OpenAI-compatible. External applications can use it as a drop-in replacement:
+
+```bash
+curl https://<LLM_DOMAIN_NAME>/v1/chat/completions \
+  --cacert ./ca.crt \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $LLM_API_KEY" \
+  -d '{"model":"gemma4:e2b","messages":[{"role":"user","content":"Hello!"}]}'
+```
+
+Omit the `Authorization` header if `LLM_API_KEY` is not set.
+
+---
+
 ## Project Structure
 
 The stack uses modular Docker Compose files for maintainability and clarity:
@@ -631,6 +777,7 @@ The stack uses modular Docker Compose files for maintainability and clarity:
 | `docker-compose.4.kibana.yaml`        | Web UI & Fleet configuration                  |
 | `docker-compose.5.fleet.yaml`         | Elastic Agent management                      |
 | `docker-compose.6.agent.yaml`         | SIEM agent & syslog ingestion                 |
+| `docker-compose.7.ollama.yaml`        | Local LLM via Ollama (optional, profile-gated) |
 
 Configuration files are organised in `configurations/`:
 
@@ -655,9 +802,19 @@ configurations/
 >
 > The ingress mode is configured into Kibana's Fleet settings at first startup. To switch modes:
 >
-> 1. Stop and remove all containers and volumes: `docker compose down -v`
+> 1. Stop containers and remove **data** volumes (preserves certificates):
+>    ```bash
+>    docker compose down --remove-orphans
+>    docker volume rm elastic-at-home_esdata01 elastic-at-home_kibanadata \
+>      elastic-at-home_fleetserverdata elastic-at-home_agentdata \
+>      elastic-at-home_ollama_data 2>/dev/null
+>    ```
 > 2. Change `INGRESS_MODE` in your `.env` file
 > 3. Redeploy: `docker compose up -d`
+>
+> This preserves your TLS certificates (`certs` volume) and Let's Encrypt ACME state (`letsencrypt` volume) to avoid unnecessary re-issuance and [Let's Encrypt rate limits](https://letsencrypt.org/docs/rate-limits/).
+>
+> For a **full reset** including certificates: `docker compose down -v --remove-orphans`
 >
 > Simply changing `INGRESS_MODE` and restarting will not update Fleet's internal configuration.
 > This is a destructive process and will require a brand new Elastic stack.

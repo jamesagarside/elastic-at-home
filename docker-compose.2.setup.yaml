@@ -2,15 +2,22 @@
 # SETUP CONTAINER - Certificate Generation & Initial Configuration
 # =============================================================================
 #
-# This container performs first-time setup tasks:
-#   1. Generates a private Certificate Authority (CA)
-#   2. Creates TLS certificates for each service signed by the CA
-#   3. Sets the kibana_system user password
-#   4. Waits for dependent services to be ready
+# This container runs in two phases:
 #
-# The setup is idempotent - if certificates already exist, it skips generation.
-# Once complete, it creates a .setup_complete marker file and stays running
-# for health checks (other services depend on this container being healthy).
+#   Phase 1 — Certificate generation (idempotent, skipped if certs exist):
+#     1. Generates a private Certificate Authority (CA)
+#     2. Creates TLS certificates for each service signed by the CA
+#     3. Sets file permissions
+#
+#   Phase 2 — Post-startup configuration (runs every time):
+#     4. Waits for Elasticsearch & sets kibana_system password
+#     5. Waits for Kibana to be ready
+#     6. When Ollama is present: creates inference endpoint, activates
+#        trial licence, and creates the Kibana GenAI connector
+#
+# This two-phase design means you can preserve the certs volume across
+# redeployments (avoiding Let's Encrypt rate limits) while still ensuring
+# the trial license and connector are re-applied when data volumes are fresh.
 #
 # =============================================================================
 
@@ -42,59 +49,58 @@ services:
       - APM_DOMAIN_NAME=${APM_DOMAIN_NAME}
       - TRAEFIK_DOMAIN_NAME=${TRAEFIK_DOMAIN_NAME}
       - TRAEFIK_IP=${TRAEFIK_IP}
+      # LLM configuration (optional — used when Ollama is running)
+      - LLM_MODEL=${LLM_MODEL:-gemma4:e2b}
+      - LLM_DISABLE_THINKING=${LLM_DISABLE_THINKING:-false}
+      - LLM_API_KEY=${LLM_API_KEY:-}
 
     command: >
       bash -c '
         # =====================================================================
-        # IDEMPOTENCY CHECK
-        # If setup was already completed, just stay alive for health checks
-        # This prevents re-running setup on container restarts
+        # PHASE 1: CERTIFICATE GENERATION (idempotent — skipped if certs exist)
+        # Certificates live in the persistent certs volume. If they already
+        # exist we skip straight to Phase 2 (post-startup configuration).
         # =====================================================================
-        if [ -f config/certs/.setup_complete ]; then
-          echo "Setup already complete, staying alive for health checks";
-          tail -f /dev/null;
-        fi;
+        if [ -f config/certs/es01/es01.crt ]; then
+          echo "Certificates already exist, skipping generation.";
+        else
+          # ===================================================================
+          # ENVIRONMENT VALIDATION
+          # ===================================================================
+          if [ x${ELASTIC_PASSWORD} == x ]; then
+            echo "Set the ELASTIC_PASSWORD environment variable in the .env file";
+            exit 1;
+          elif [ x${KIBANA_PASSWORD} == x ]; then
+            echo "Set the KIBANA_PASSWORD environment variable in the .env file";
+            exit 1;
+          fi;
 
-        # =====================================================================
-        # ENVIRONMENT VALIDATION
-        # Ensure required passwords are set before proceeding
-        # The x prefix handles empty variables safely in shell comparison
-        # =====================================================================
-        if [ x${ELASTIC_PASSWORD} == x ]; then
-          echo "Set the ELASTIC_PASSWORD environment variable in the .env file";
-          exit 1;
-        elif [ x${KIBANA_PASSWORD} == x ]; then
-          echo "Set the KIBANA_PASSWORD environment variable in the .env file";
-          exit 1;
-        fi;
+          # ===================================================================
+          # STEP 1: CREATE CERTIFICATE AUTHORITY (CA)
+          # The CA is the "root of trust" - all service certificates are signed
+          # by this CA. Services trust each other because they all trust the CA.
+          # Using --pem outputs PEM format files (ca.crt and ca.key)
+          # ===================================================================
+          if [ ! -f config/certs/ca.zip ]; then
+            echo "Creating CA";
+            bin/elasticsearch-certutil ca --silent --pem -out config/certs/ca.zip;
+            unzip config/certs/ca.zip -d config/certs;
+          fi;
 
-        # =====================================================================
-        # STEP 1: CREATE CERTIFICATE AUTHORITY (CA)
-        # The CA is the "root of trust" - all service certificates are signed
-        # by this CA. Services trust each other because they all trust the CA.
-        # Using --pem outputs PEM format files (ca.crt and ca.key)
-        # =====================================================================
-        if [ ! -f config/certs/ca.zip ]; then
-          echo "Creating CA";
-          bin/elasticsearch-certutil ca --silent --pem -out config/certs/ca.zip;
-          unzip config/certs/ca.zip -d config/certs;
-        fi;
-
-        # =====================================================================
-        # STEP 2: CREATE SERVICE CERTIFICATES
-        # Generate certificates for each service signed by our CA.
-        # The instances.yml file defines which DNS names and IP addresses
-        # each certificate should be valid for (Subject Alternative Names).
-        #
-        # Why multiple DNS entries?
-        #   - Container names (es01, kibana) for internal Docker communication
-        #   - localhost for local testing
-        #   - External domain names for Traefik reverse proxy access
-        #
-        # The Traefik certificate is special - it includes ALL external domains
-        # because Traefik terminates TLS for all incoming HTTPS traffic.
-        # =====================================================================
-        if [ ! -f config/certs/certs.zip ]; then
+          # ===================================================================
+          # STEP 2: CREATE SERVICE CERTIFICATES
+          # Generate certificates for each service signed by our CA.
+          # The instances.yml file defines which DNS names and IP addresses
+          # each certificate should be valid for (Subject Alternative Names).
+          #
+          # Why multiple DNS entries?
+          #   - Container names (es01, kibana) for internal Docker communication
+          #   - localhost for local testing
+          #   - External domain names for Traefik reverse proxy access
+          #
+          # The Traefik certificate is special - it includes ALL external
+          # domains because Traefik terminates TLS for all incoming HTTPS.
+          # ===================================================================
           echo "Creating certs";
           echo -ne \
           "instances:\n"\
@@ -131,24 +137,31 @@ services:
           "      - ${FLEET_DOMAIN_NAME}\n"\
           "      - ${APM_DOMAIN_NAME}\n"\
           "      - ${TRAEFIK_DOMAIN_NAME}\n"\
+          "      - ${LLM_DOMAIN_NAME:-localhost}\n"\
           "    ip:\n"\
           "      - ${TRAEFIK_IP:-127.0.0.1}\n"\
           > config/certs/instances.yml;
           bin/elasticsearch-certutil cert --silent --pem -out config/certs/certs.zip --in config/certs/instances.yml --ca-cert config/certs/ca/ca.crt --ca-key config/certs/ca/ca.key;
           unzip config/certs/certs.zip -d config/certs;
+
+          # ===================================================================
+          # STEP 3: SET FILE PERMISSIONS
+          # Elasticsearch requires specific permissions on certificate files:
+          #   - Directories: 750 (owner rwx, group rx, others none)
+          #   - Files: 640 (owner rw, group r, others none)
+          # ===================================================================
+          echo "Setting file permissions";
+          chown -R root:root config/certs;
+          find . -type d -exec chmod 750 \{\} \;;
+          find . -type f -exec chmod 640 \{\} \;;
         fi;
 
         # =====================================================================
-        # STEP 3: SET FILE PERMISSIONS
-        # Elasticsearch requires specific permissions on certificate files:
-        #   - Directories: 750 (owner rwx, group rx, others none)
-        #   - Files: 640 (owner rw, group r, others none)
-        # This prevents unauthorized access to private keys
+        # PHASE 2: POST-STARTUP CONFIGURATION
+        # This runs on EVERY startup (not just first time). Data volumes may
+        # have been removed while certs were preserved, so passwords, trial
+        # license, and connectors all need to be re-applied.
         # =====================================================================
-        echo "Setting file permissions";
-        chown -R root:root config/certs;
-        find . -type d -exec chmod 750 \{\} \;;
-        find . -type f -exec chmod 640 \{\} \;;
 
         # =====================================================================
         # STEP 4: WAIT FOR ELASTICSEARCH
@@ -164,24 +177,126 @@ services:
         # The kibana_system user is a built-in user that Kibana uses to
         # communicate with Elasticsearch. We set its password here so
         # Kibana can authenticate when it starts up.
+        # This is safe to re-run — it just sets the same password again.
         # =====================================================================
         echo "Setting kibana_system password";
         until curl -s -X POST --cacert config/certs/ca/ca.crt -u "elastic:${ELASTIC_PASSWORD}" -H "Content-Type: application/json" https://es01:9200/_security/user/kibana_system/_password -d "{\"password\":\"${KIBANA_PASSWORD}\"}" | grep -q "^{}"; do sleep 10; done;
 
         # =====================================================================
         # STEP 6: WAIT FOR KIBANA
-        # Wait for Kibana to be fully ready before marking setup complete.
-        # This ensures Fleet configuration can be applied properly.
+        # Wait for Kibana to be fully ready before configuring connectors.
         # =====================================================================
         echo "Waiting for Kibana to be ready...";
         until curl -s --cacert config/certs/ca/ca.crt https://kibana:5601/api/status | grep -q "available"; do sleep 10; done;
 
         # =====================================================================
-        # STEP 7: MARK SETUP COMPLETE
-        # Create marker file so subsequent restarts skip the setup process
+        # STEP 7: CONFIGURE LOCAL LLM INFERENCE ENDPOINT (Optional)
+        # When ENABLE_LLM=true, wait for Ollama to be ready, then register
+        # an Elasticsearch inference endpoint pointing to the local Ollama
+        # OpenAI-compatible API. This enables Kibana AI Assistant, semantic
+        # search, and inference pipelines to use the local model.
         # =====================================================================
-        touch config/certs/.setup_complete;
-        echo "All done!";
+        echo "Checking for local LLM (Ollama)...";
+        if curl -sf http://ollama:11434/api/tags >/dev/null 2>&1; then
+          echo "Ollama detected, waiting for model to be ready...";
+          # Resolve the effective model name up-front so the readiness probe
+          # greps for it specifically (avoids a false positive on the empty
+          # '{"models":[]}' response that Ollama returns before the pull).
+          LLM_EFFECTIVE_MODEL="${LLM_MODEL:-gemma4:e2b}";
+          if [ "${LLM_DISABLE_THINKING:-false}" = "true" ]; then
+            LLM_EFFECTIVE_MODEL="${LLM_MODEL:-gemma4:e2b}-fast";
+          fi;
+          ollama_ready=false;
+          # Allow up to 15 minutes for the model pull on a cold volume
+          # (gemma4:e2b is ~1.5GB; slow connections have been seen to need >5m).
+          for attempt in $$(seq 1 90); do
+            if curl -sf http://ollama:11434/api/tags 2>/dev/null | grep -q "\"name\":\"$$LLM_EFFECTIVE_MODEL\""; then
+              ollama_ready=true;
+              break;
+            fi;
+            echo "Ollama model loading... (attempt $$attempt/90)";
+            sleep 10;
+          done;
+
+          if [ "$$ollama_ready" = "true" ]; then
+            echo "Creating inference endpoint for local LLM ($$LLM_EFFECTIVE_MODEL)...";
+            endpoint_response=$$(curl -s -X PUT --cacert config/certs/ca/ca.crt \
+              -u "elastic:${ELASTIC_PASSWORD}" \
+              -H "Content-Type: application/json" \
+              "https://es01:9200/_inference/completion/local-llm" \
+              -d "{\"service\":\"openai\",\"service_settings\":{\"api_key\":\"${LLM_API_KEY:-not-needed}\",\"url\":\"http://ollama:11434/v1/chat/completions\",\"model_id\":\"$$LLM_EFFECTIVE_MODEL\"}}" 2>&1);
+            if echo "$$endpoint_response" | grep -q "\"inference_id\":\"local-llm\""; then
+              echo "Inference endpoint created";
+            elif echo "$$endpoint_response" | grep -q "already exists\|resource_already_exists"; then
+              echo "Inference endpoint already exists";
+            else
+              echo "WARNING: Could not create inference endpoint: $$endpoint_response";
+            fi;
+
+            # =============================================================
+            # STEP 7b: ACTIVATE TRIAL LICENSE
+            # GenAI connectors (used by Kibana AI Assistant) require an
+            # Enterprise licence. Activating a trial gives all Enterprise
+            # features free for 30 days, which is needed to create the
+            # Kibana connector that wires the AI Assistant to Ollama.
+            #
+            # After the 30-day trial expires the following will stop working:
+            #   - Kibana AI Assistant (GenAI connector)
+            #   - Machine Learning anomaly detection jobs
+            #   - Watcher / Alerting (advanced)
+            #   - Graph exploration
+            #   - Custom roles with field-/document-level security
+            # Core SIEM, Fleet, Elastic Agent, and search remain on Basic.
+            #
+            # Safe to re-run: returns "already activated" if trial is active.
+            # =============================================================
+            echo "Activating trial license for GenAI connector support...";
+            trial_response=$$(curl -s -X POST --cacert config/certs/ca/ca.crt \
+              -u "elastic:${ELASTIC_PASSWORD}" \
+              -H "Content-Type: application/json" \
+              "https://es01:9200/_license/start_trial?acknowledge=true" 2>&1);
+            if echo "$$trial_response" | grep -q "trial_was_started"; then
+              echo "Trial license activated successfully (30 days)";
+            elif echo "$$trial_response" | grep -q "already"; then
+              echo "Trial license already active";
+            else
+              echo "WARNING: Could not activate trial license: $$trial_response";
+              echo "GenAI connector will not be created (requires Enterprise features).";
+            fi;
+
+            # =============================================================
+            # STEP 7c: CREATE KIBANA GENAI CONNECTOR
+            # Create an OpenAI-type connector in Kibana pointing at the
+            # local Ollama instance. This is what the Kibana AI Assistant
+            # actually uses — the inference endpoint alone is not enough.
+            # Requires trial or enterprise license to be active.
+            # Safe to re-run: skips if connector already exists.
+            # =============================================================
+            echo "Creating Kibana GenAI connector for local LLM...";
+            connector_response=$$(curl -s -X POST --cacert config/certs/ca/ca.crt \
+              -u "elastic:${ELASTIC_PASSWORD}" \
+              -H "Content-Type: application/json" \
+              -H "kbn-xsrf: true" \
+              "https://kibana:5601/api/actions/connector" \
+              -d "{\"connector_type_id\":\".gen-ai\",\"name\":\"Local LLM (Ollama)\",\"config\":{\"apiProvider\":\"Other\",\"apiUrl\":\"http://ollama:11434/v1/chat/completions\",\"defaultModel\":\"$$LLM_EFFECTIVE_MODEL\",\"enableNativeFunctionCalling\":false},\"secrets\":{\"apiKey\":\"${LLM_API_KEY:-not-needed}\"}}" \
+              2>&1);
+            if echo "$$connector_response" | grep -q '"id"'; then
+              connector_id=$$(echo "$$connector_response" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4);
+              echo "Kibana GenAI connector created successfully (id: $$connector_id)";
+            elif echo "$$connector_response" | grep -q "already exists"; then
+              echo "Kibana GenAI connector already exists";
+            else
+              echo "WARNING: Could not create Kibana GenAI connector: $$connector_response";
+            fi;
+          else
+            echo "WARNING: Ollama model did not load within 15 minutes. Skipping inference endpoint.";
+          fi;
+        else
+          echo "No Ollama detected, skipping LLM inference endpoint setup.";
+        fi;
+
+        echo "All done! Staying alive for health checks.";
+        tail -f /dev/null;
       '
 
     # Health check verifies that certificate generation completed successfully

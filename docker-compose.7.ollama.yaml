@@ -1,0 +1,155 @@
+# =============================================================================
+# OLLAMA - Local LLM Inference Server (Optional)
+# =============================================================================
+#
+# Ollama runs a local Large Language Model for use with Elasticsearch's
+# Inference API, Kibana's AI Assistant, and semantic search features.
+#
+# This service is OPTIONAL and disabled by default. To enable it:
+#   1. Set ENABLE_LLM=true in your .env file
+#   2. Run docker compose up as normal
+#
+# The default model is Google Gemma 4 E2B (2B parameters), which needs
+# ~7.2GB RAM at runtime. The default memory limit is 8GB.
+#
+# On first start, the model is downloaded from the Ollama registry (~1.5GB).
+# Subsequent starts use the cached model from the ollama_data volume.
+#
+# To expose Ollama to other devices on your network, also set:
+#   ENABLE_LLM_INGRESS=true
+#
+# KEY CONCEPTS:
+#   - Inference API: Elasticsearch's interface for AI model access
+#   - OpenAI-compatible API: Ollama exposes /v1/ endpoints that ES understands
+#
+# =============================================================================
+
+services:
+  ollama:
+    # Wait for Elasticsearch to be healthy before starting
+    # (the setup container will configure the inference endpoint after Ollama is ready)
+    depends_on:
+      es01:
+        condition: service_healthy
+
+    image: ollama/ollama:latest
+    container_name: ollama
+
+    networks:
+      - elastic
+
+    volumes:
+      # Persistent volume for downloaded models — survives container restarts
+      - ollama_data:/root/.ollama
+
+    # -------------------------------------------------------------------------
+    # MODEL AUTO-PULL
+    # -------------------------------------------------------------------------
+    # Override the default entrypoint to:
+    #   1. Start the Ollama server in the background
+    #   2. Wait for it to be ready
+    #   3. Pull the configured model (idempotent — skips if already downloaded)
+    #   4. Keep the server running in the foreground
+    # -------------------------------------------------------------------------
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        # Exit immediately if LLM is not enabled
+        if [ "$${ENABLE_LLM}" != "true" ]; then
+          echo "LLM disabled (ENABLE_LLM != true), exiting."
+          exit 0
+        fi
+
+        # Start Ollama server in the background
+        ollama serve &
+        SERVER_PID=$$!
+
+        # Wait for the server to be ready
+        echo "Waiting for Ollama server to start..."
+        until ollama list >/dev/null 2>&1; do
+          sleep 2
+        done
+        echo "Ollama server is ready"
+
+        # Pull the configured model (idempotent — no-op if already present)
+        echo "Pulling model $${LLM_MODEL:-gemma4:e2b}..."
+        ollama pull $${LLM_MODEL:-gemma4:e2b}
+        echo "Model $${LLM_MODEL:-gemma4:e2b} is ready"
+
+        # Optionally create a variant with thinking/reasoning disabled.
+        # This reduces token generation overhead on low-power hardware
+        # like Raspberry Pi by skipping internal chain-of-thought tokens.
+        if [ "$${LLM_DISABLE_THINKING}" = "true" ]; then
+          echo "Creating optimised model variant with thinking disabled..."
+          cat > /tmp/Modelfile <<MODELFILE
+        FROM $${LLM_MODEL:-gemma4:e2b}
+        PARAMETER thinking false
+        MODELFILE
+          ollama create "$${LLM_MODEL:-gemma4:e2b}-fast" -f /tmp/Modelfile
+          rm /tmp/Modelfile
+          echo "Optimised model $${LLM_MODEL:-gemma4:e2b}-fast is ready"
+        fi
+
+        # Keep the server running in the foreground
+        wait $$SERVER_PID
+
+    environment:
+      - ENABLE_LLM=${ENABLE_LLM:-false}
+      - LLM_MODEL=${LLM_MODEL:-gemma4:e2b}
+      # Set to "true" to create a model variant with thinking/reasoning
+      # disabled — faster responses on low-power hardware (e.g. Raspberry Pi)
+      - LLM_DISABLE_THINKING=${LLM_DISABLE_THINKING:-false}
+      # API key for Ollama — passed as OLLAMA_API_KEY so Ollama enforces it
+      - OLLAMA_API_KEY=${LLM_API_KEY:-}
+      # Ollama listens on all interfaces within the container
+      - OLLAMA_HOST=0.0.0.0
+
+    # -------------------------------------------------------------------------
+    # TRAEFIK LABELS (for network ingress)
+    # -------------------------------------------------------------------------
+    # These labels are always present but Traefik only routes to this service
+    # when the container is running (i.e., when the llm profile is active).
+    # For hostname-based routing (selfsigned + letsencrypt modes).
+    # Direct mode uses port-based routing defined in the dynamic config.
+    # -------------------------------------------------------------------------
+    labels:
+      - "traefik.enable=${ENABLE_LLM_INGRESS:-false}"
+      - "traefik.http.routers.ollama.rule=Host(`${LLM_DOMAIN_NAME}`)"
+      - "traefik.http.routers.ollama.entrypoints=websecure"
+      - "traefik.http.routers.ollama.tls=true"
+      - "traefik.http.routers.ollama.tls.certresolver=${INGRESS_MODE:-}"
+      - "traefik.http.services.ollama.loadbalancer.server.port=11434"
+      - "traefik.http.services.ollama.loadbalancer.server.scheme=http"
+
+    mem_limit: ${LLM_MEM_LIMIT:-8589934592}
+
+    # -------------------------------------------------------------------------
+    # HEALTH CHECK
+    # -------------------------------------------------------------------------
+    # Verifies that Ollama is running AND the configured model is loaded.
+    # The /api/tags endpoint lists available models — we check for our model.
+    # Other services (setup container) wait for this before creating the
+    # inference endpoint in Elasticsearch.
+    # -------------------------------------------------------------------------
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "ollama list | grep -q '${LLM_MODEL:-gemma4:e2b}' || exit 1",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 30s
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+# ollama_data stores downloaded model weights.
+# IMPORTANT: Models can be 1-10GB+. This volume persists across restarts
+# to avoid re-downloading.
+# =============================================================================
+volumes:
+  ollama_data:
+    driver: local

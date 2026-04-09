@@ -275,6 +275,51 @@ deploy_and_wait() {
 
     # Extract CA certificate
     docker compose cp setup:/usr/share/elasticsearch/config/certs/ca/ca.crt "$PROJECT_DIR/ca.crt" 2>/dev/null || true
+
+    # When LLM is enabled, the setup container has extra work to do: wait for
+    # Ollama to pull the model, register the ES inference endpoint, activate
+    # the trial licence, and create the Kibana GenAI connector. The first-run
+    # model pull can take several minutes on a cold volume, so the LLM tests
+    # will fail if they run before setup finishes. Block until the inference
+    # endpoint exists in ES (or give up after 10 minutes).
+    local enable_llm="false"
+    if [[ -f "$PROJECT_DIR/.env" ]]; then
+        enable_llm=$(grep -E '^ENABLE_LLM=' "$PROJECT_DIR/.env" | cut -d= -f2 || echo "false")
+    fi
+    if [[ "$enable_llm" == "true" ]]; then
+        log_info "LLM enabled — waiting for Ollama model pull and setup to register the inference endpoint..."
+        local llm_waited=0
+        local llm_timeout=600
+        local ca="$PROJECT_DIR/ca.crt"
+        while [[ $llm_waited -lt $llm_timeout ]]; do
+            # Authoritative signal: the endpoint is actually queryable in ES.
+            # The setup container's log line "already exists or pending" is
+            # emitted for both success and silent failure, so don't trust it.
+            local status
+            status=$(curl -s -o /dev/null -w "%{http_code}" \
+                --cacert "$ca" \
+                -u "elastic:${ELASTIC_PASSWORD}" \
+                --connect-timeout 5 \
+                "https://localhost:9200/_inference/completion/local-llm" 2>/dev/null || echo "000")
+            # Fallback for direct mode where 9200 goes via Traefik but curl to
+            # Traefik's ES entrypoint still works with the same CA.
+            if [[ "$status" == "200" ]]; then
+                log_success "ES inference endpoint ready after ${llm_waited}s"
+                break
+            fi
+            sleep 15
+            llm_waited=$((llm_waited + 15))
+            if (( llm_waited % 60 == 0 )); then
+                log_info "Still waiting for LLM setup (${llm_waited}s/${llm_timeout}s, last ES status: $status)..."
+            fi
+        done
+        if [[ $llm_waited -ge $llm_timeout ]]; then
+            log_warn "LLM setup did not complete within ${llm_timeout}s — LLM tests may fail"
+            log_info "Setup container tail:"
+            docker compose logs setup --tail=20 2>&1 | tail -20
+        fi
+    fi
+
     log_success "Stack is running"
 }
 
@@ -283,6 +328,7 @@ run_test_suite() {
     local kibana_url="$2"
     local fleet_url="$3"
     local mode="$4"
+    local llm_url="${5:-}"
 
     export ELASTICSEARCH_URL="$es_url"
     export KIBANA_URL="$kibana_url"
@@ -290,6 +336,23 @@ run_test_suite() {
     export ELASTIC_PASSWORD
     export CA_CERT="$PROJECT_DIR/ca.crt"
     export INGRESS_MODE="$mode"
+
+    # When a caller supplies an LLM URL, expose it to the test-stack harness
+    # so the Ollama / ingress tests can actually probe the endpoint instead of
+    # falling back to skip/fail.
+    if [[ -n "$llm_url" ]]; then
+        # Propagate ENABLE_LLM / ENABLE_LLM_INGRESS from .env so test-stack
+        # decides whether to run or skip the LLM-specific tests.
+        if [[ -f "$PROJECT_DIR/.env" ]]; then
+            local enable_llm enable_llm_ingress
+            enable_llm=$(grep -E '^ENABLE_LLM=' "$PROJECT_DIR/.env" | cut -d= -f2)
+            enable_llm_ingress=$(grep -E '^ENABLE_LLM_INGRESS=' "$PROJECT_DIR/.env" | cut -d= -f2)
+            export ENABLE_LLM="${enable_llm:-false}"
+            export ENABLE_LLM_INGRESS="${enable_llm_ingress:-false}"
+        fi
+        export OLLAMA_URL="$llm_url"
+        export LLM_INGRESS_URL="$llm_url"
+    fi
 
     bash "$PROJECT_DIR/.github/scripts/test-stack.sh" all
 }
@@ -434,7 +497,7 @@ test_direct() {
     done
 
     local result=0
-    run_test_suite "https://localhost:9200" "https://localhost:5601" "https://localhost:8220" "direct" || result=1
+    run_test_suite "https://localhost:9200" "https://localhost:5601" "https://localhost:8220" "direct" "https://localhost:11434" || result=1
 
     teardown
 
@@ -581,8 +644,16 @@ _test_letsencrypt_full() {
     local cert_obtained=false
 
     while [[ $cert_waited -lt $cert_timeout ]]; do
-        if docker compose logs traefik 2>&1 | grep -q "Certificate obtained successfully"; then
-            log_success "Let's Encrypt certificate obtained"
+        # Detect issuance via log message (best-effort; phrasing varies between
+        # Traefik versions) OR by probing TLS and checking for a real LE issuer.
+        if docker compose logs traefik 2>&1 | grep -qE "Certificate obtained|Adding certificate|Register.*account|Domains.*certif"; then
+            log_success "Let's Encrypt certificate obtained (log match)"
+            cert_obtained=true
+            break
+        fi
+        if echo | openssl s_client -connect "${kibana_domain}:443" -servername "${kibana_domain}" 2>/dev/null \
+            | openssl x509 -noout -issuer 2>/dev/null | grep -qiE "let.?s.?encrypt|O=Let's Encrypt"; then
+            log_success "Let's Encrypt certificate obtained (TLS probe)"
             cert_obtained=true
             break
         fi

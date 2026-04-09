@@ -546,6 +546,239 @@ test_syslog_ingestion() {
 }
 
 # =============================================================================
+# LLM / Ollama Tests (optional — only run when ENABLE_LLM=true)
+# =============================================================================
+
+ENABLE_LLM="${ENABLE_LLM:-false}"
+OLLAMA_URL="${OLLAMA_URL:-http://localhost:11434}"
+
+test_ollama_health() {
+    log_test_start "Ollama Health"
+
+    if [[ "$ENABLE_LLM" != "true" ]]; then
+        record_skip "LLM not enabled (ENABLE_LLM != true)"
+        return 0
+    fi
+
+    local opts=$(_curl_opts)
+    local response=$(curl $opts -f "${OLLAMA_URL}/api/tags" 2>&1) || response=""
+
+    if [[ -n "$response" ]]; then
+        local model_count=$(echo "$response" | jq '.models | length' 2>/dev/null || echo "0")
+        if [[ "$model_count" -gt 0 ]]; then
+            record_pass "Ollama healthy: $model_count model(s) loaded"
+            return 0
+        fi
+        record_fail "Ollama running but no models loaded"
+        return 1
+    fi
+
+    record_fail "Ollama not responding at $OLLAMA_URL"
+    return 1
+}
+
+test_inference_endpoint() {
+    log_test_start "Elasticsearch Inference Endpoint (local-llm)"
+
+    if [[ "$ENABLE_LLM" != "true" ]]; then
+        record_skip "LLM not enabled (ENABLE_LLM != true)"
+        return 0
+    fi
+
+    local response=$(api_get "${ELASTICSEARCH_URL}/_inference/completion/local-llm")
+    local endpoint_id=$(json_get '.endpoints[0].inference_id // .inference_id' "$response")
+
+    if [[ "$endpoint_id" == "local-llm" ]]; then
+        record_pass "Inference endpoint 'local-llm' exists"
+        return 0
+    fi
+
+    record_fail "Inference endpoint 'local-llm' not found"
+    return 1
+}
+
+test_trial_license() {
+    log_test_start "Trial License Active"
+
+    if [[ "$ENABLE_LLM" != "true" ]]; then
+        record_skip "LLM not enabled (ENABLE_LLM != true)"
+        return 0
+    fi
+
+    local response=$(api_get "${ELASTICSEARCH_URL}/_license")
+    local license_type=$(json_get '.license.type' "$response")
+    local license_status=$(json_get '.license.status' "$response")
+
+    if [[ "$license_type" == "trial" && "$license_status" == "active" ]]; then
+        local expiry=$(json_get '.license.expiry_date' "$response")
+        record_pass "Trial license active (expires: $expiry)"
+        return 0
+    fi
+
+    if [[ "$license_type" == "enterprise" || "$license_type" == "platinum" || "$license_type" == "gold" ]]; then
+        record_pass "License type '$license_type' supports GenAI connectors"
+        return 0
+    fi
+
+    LAST_RESPONSE="$response"
+    record_fail "License type '$license_type' (status: $license_status) — GenAI connectors require trial or enterprise"
+    return 1
+}
+
+test_kibana_genai_connector() {
+    log_test_start "Kibana GenAI Connector (Local LLM)"
+
+    if [[ "$ENABLE_LLM" != "true" ]]; then
+        record_skip "LLM not enabled (ENABLE_LLM != true)"
+        return 0
+    fi
+
+    local opts=$(_curl_opts)
+    local response=$(curl $opts -u "${ELASTIC_USER}:${ELASTIC_PASSWORD}" \
+        -H "kbn-xsrf: true" \
+        "${KIBANA_URL}/api/actions/connectors" 2>&1) || response=""
+
+    # Look for our connector by name
+    local connector_id=$(echo "$response" | jq -r '.[] | select(.name == "Local LLM (Ollama)") | .id // empty' 2>/dev/null || echo "")
+
+    if [[ -n "$connector_id" ]]; then
+        record_pass "GenAI connector found (id: $connector_id)"
+        return 0
+    fi
+
+    # Check if any .gen-ai connector exists
+    local genai_count=$(echo "$response" | jq '[.[] | select(.connector_type_id == ".gen-ai")] | length' 2>/dev/null || echo "0")
+    if [[ "$genai_count" -gt 0 ]]; then
+        record_pass "GenAI connector(s) found ($genai_count total)"
+        return 0
+    fi
+
+    LAST_RESPONSE="$response"
+    record_fail "No GenAI connector found — Kibana AI Assistant will not work with the local LLM"
+    return 1
+}
+
+test_inference_completion() {
+    log_test_start "Inference Completion Round-Trip"
+
+    if [[ "$ENABLE_LLM" != "true" ]]; then
+        record_skip "LLM not enabled (ENABLE_LLM != true)"
+        return 0
+    fi
+
+    local opts=$(_curl_opts)
+    local response=$(curl $opts -u "${ELASTIC_USER}:${ELASTIC_PASSWORD}" \
+        -H "Content-Type: application/json" \
+        -X POST "${ELASTICSEARCH_URL}/_inference/completion/local-llm" \
+        -d '{"input":"Say hello in one word."}' 2>&1) || response=""
+
+    local completion=$(json_get '.completion[0].result // .completion // empty' "$response")
+
+    if [[ -n "$completion" && "$completion" != "null" && "$completion" != "" ]]; then
+        record_pass "Inference completion returned a response"
+        return 0
+    fi
+
+    LAST_RESPONSE="$response"
+    record_fail "Inference completion returned no result"
+    return 1
+}
+
+# =============================================================================
+# LLM Ingress Tests (optional — only run when ENABLE_LLM_INGRESS=true)
+# =============================================================================
+
+ENABLE_LLM_INGRESS="${ENABLE_LLM_INGRESS:-false}"
+LLM_INGRESS_URL="${LLM_INGRESS_URL:-}"
+
+test_llm_ingress_models() {
+    log_test_start "LLM Ingress: Model List"
+
+    if [[ "$ENABLE_LLM_INGRESS" != "true" ]]; then
+        record_skip "LLM ingress not enabled (ENABLE_LLM_INGRESS != true)"
+        return 0
+    fi
+
+    if [[ -z "$LLM_INGRESS_URL" ]]; then
+        record_fail "LLM_INGRESS_URL not set"
+        return 1
+    fi
+
+    local opts=$(_curl_opts)
+    local response=$(curl $opts "${LLM_INGRESS_URL}/v1/models" 2>&1) || response=""
+    local model_count=$(echo "$response" | jq '.data | length' 2>/dev/null || echo "0")
+
+    if [[ "$model_count" -gt 0 ]]; then
+        record_pass "LLM ingress: $model_count model(s) available via /v1/models"
+        return 0
+    fi
+
+    LAST_RESPONSE="$response"
+    record_fail "LLM ingress: no models returned from /v1/models"
+    return 1
+}
+
+test_llm_ingress_completion() {
+    log_test_start "LLM Ingress: Chat Completion"
+
+    if [[ "$ENABLE_LLM_INGRESS" != "true" ]]; then
+        record_skip "LLM ingress not enabled (ENABLE_LLM_INGRESS != true)"
+        return 0
+    fi
+
+    if [[ -z "$LLM_INGRESS_URL" ]]; then
+        record_fail "LLM_INGRESS_URL not set"
+        return 1
+    fi
+
+    local opts=$(_curl_opts)
+    local response=$(curl $opts \
+        -H "Content-Type: application/json" \
+        -X POST "${LLM_INGRESS_URL}/v1/chat/completions" \
+        -d '{"model":"gemma4:e2b","messages":[{"role":"user","content":"Say hi"}],"max_tokens":10}' \
+        2>&1) || response=""
+
+    local content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || echo "")
+
+    if [[ -n "$content" ]]; then
+        record_pass "LLM ingress: chat completion returned a response"
+        return 0
+    fi
+
+    LAST_RESPONSE="$response"
+    record_fail "LLM ingress: no chat completion response"
+    return 1
+}
+
+test_llm_no_ingress() {
+    log_test_start "LLM No Ingress: Ollama not routable via Traefik"
+
+    if [[ "$ENABLE_LLM_INGRESS" == "true" ]]; then
+        record_skip "LLM ingress is enabled — skipping negative test"
+        return 0
+    fi
+
+    if [[ -z "$LLM_INGRESS_URL" ]]; then
+        record_skip "LLM_INGRESS_URL not set — cannot verify negative case"
+        return 0
+    fi
+
+    # Ollama should NOT be reachable through Traefik when ingress is disabled
+    local opts=$(_curl_opts)
+    local status=$(curl $opts -o /dev/null -w "%{http_code}" --connect-timeout 5 \
+        "${LLM_INGRESS_URL}/v1/models" 2>/dev/null || echo "000")
+
+    if [[ "$status" == "000" || "$status" == "404" || "$status" == "502" || "$status" == "503" ]]; then
+        record_pass "LLM not routable via Traefik when ingress disabled (HTTP $status)"
+        return 0
+    fi
+
+    LAST_STATUS="$status"
+    record_fail "LLM unexpectedly reachable via Traefik (HTTP $status) — ingress should be disabled"
+    return 1
+}
+
+# =============================================================================
 # User Tests (for custom user validation)
 # =============================================================================
 
@@ -627,6 +860,19 @@ run_syslog_tests() {
     test_syslog_ingestion || true
 }
 
+run_llm_tests() {
+    echo -e "\n${BLUE}═══ LLM / Ollama Tests ═══${NC}"
+    test_ollama_health || true
+    test_trial_license || true
+    test_inference_endpoint || true
+    test_kibana_genai_connector || true
+    test_inference_completion || true
+    echo -e "\n${BLUE}═══ LLM Ingress Tests ═══${NC}"
+    test_llm_ingress_models || true
+    test_llm_ingress_completion || true
+    test_llm_no_ingress || true
+}
+
 run_all_tests() {
     run_certificate_tests
     run_elasticsearch_tests
@@ -634,6 +880,7 @@ run_all_tests() {
     run_fleet_tests
     run_agent_tests
     run_syslog_tests
+    run_llm_tests
 }
 
 # =============================================================================
@@ -652,6 +899,9 @@ main() {
     echo -e "Syslog:        ${SYSLOG_HOST}:${SYSLOG_PORT}"
     echo -e "Ingress Mode:  $INGRESS_MODE"
     echo -e "CA Cert:       ${CA_CERT:-none}"
+    echo -e "LLM Enabled:   $ENABLE_LLM"
+    echo -e "LLM Ingress:   $ENABLE_LLM_INGRESS"
+    echo -e "LLM URL:       ${LLM_INGRESS_URL:-not set}"
     echo -e "Debug:         $DEBUG"
 
     case "$test_suite" in
@@ -661,10 +911,11 @@ main() {
         fleet)              run_fleet_tests ;;
         agent)              run_agent_tests ;;
         syslog)             run_syslog_tests ;;
+        llm)                run_llm_tests ;;
         all)                run_all_tests ;;
         *)
             echo "Unknown test suite: $test_suite"
-            echo "Available: all, certificates, elasticsearch, kibana, fleet, agent, syslog"
+            echo "Available: all, certificates, elasticsearch, kibana, fleet, agent, syslog, llm"
             exit 1
             ;;
     esac
