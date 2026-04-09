@@ -1,0 +1,48 @@
+# Traefik Configuration - Self-Signed Mode
+#
+# This configuration uses ES CA-signed certificates for all services.
+# All domain names are included as SANs in a single certificate.
+#
+# Browser Access:
+#   Click "proceed to site" when prompted about the untrusted certificate.
+#   Use incognito/private browsing if you encounter cached certificate issues.
+#
+# Agent Enrolment:
+#   Agents connecting to Fleet/ES should trust the CA certificate:
+#   docker cp $(docker compose ps -q setup):/certs/ca/ca.crt ./ca.crt
+#
+# No ACME/Let's Encrypt - works in air-gapped environments.
+
+api:
+  insecure: true
+  dashboard: true
+
+ping: true
+
+accessLog:
+  format: json
+
+providers:
+  docker:
+    exposedByDefault: false
+  file:
+    filename: /etc/traefik/dynamic.yaml
+
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+    http:
+      tls: {}
+  syslog-tcp:
+    address: ":514"
+  syslog-udp:
+    address: ":514/udp"
+
+# TLS and serversTransports are loaded from dynamic.yaml

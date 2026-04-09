@@ -1,0 +1,447 @@
+name: Check Elastic Stack Release
+
+on:
+  schedule:
+    # Run daily at 06:00 UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (skip PR creation)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check-version:
+    name: Check for New Releases
+    runs-on: ubuntu-latest
+    outputs:
+      new_elastic_version: ${{ steps.check-elastic.outputs.new_version }}
+      current_elastic_version: ${{ steps.check-elastic.outputs.current_version }}
+      new_traefik_version: ${{ steps.check-traefik.outputs.new_version }}
+      current_traefik_version: ${{ steps.check-traefik.outputs.current_version }}
+      has_updates: ${{ steps.summary.outputs.has_updates }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check latest Elastic Stack version
+        id: check-elastic
+        run: |
+          # Get the current version from our workflow files
+          CURRENT=$(grep -oP "default: '\K[0-9]+\.[0-9]+\.[0-9]+" .github/workflows/test-direct.yml | head -1)
+          echo "current_version=$CURRENT" >> $GITHUB_OUTPUT
+          echo "Current Elastic version: $CURRENT"
+
+          # Query Docker Hub for latest elasticsearch tag
+          # Filter for stable releases (X.Y.Z format, no -SNAPSHOT, -rc, -beta)
+          LATEST=$(curl -s "https://registry.hub.docker.com/v2/namespaces/elastic/repositories/elasticsearch/tags?page_size=50&ordering=last_updated" \
+            | jq -r '.results[].name' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V \
+            | tail -1)
+
+          # Fallback: try the Elastic artifacts API
+          if [[ -z "$LATEST" || "$LATEST" == "null" ]]; then
+            LATEST=$(curl -s "https://artifacts-api.elastic.co/v1/versions" \
+              | jq -r '.versions[]' \
+              | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V \
+              | tail -1)
+          fi
+
+          echo "Latest Elastic version: $LATEST"
+
+          if [[ -z "$LATEST" || "$LATEST" == "null" ]]; then
+            echo "Could not determine latest version"
+            echo "new_version=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          if [[ "$LATEST" != "$CURRENT" ]]; then
+            echo "New version available: $LATEST (current: $CURRENT)"
+            echo "new_version=$LATEST" >> $GITHUB_OUTPUT
+          else
+            echo "Already up to date"
+            echo "new_version=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check latest Traefik version
+        id: check-traefik
+        run: |
+          # Get current Traefik version from compose file
+          CURRENT=$(grep -oP 'traefik:v\K[0-9]+\.[0-9]+\.[0-9]+' docker-compose.1.traefik.yaml)
+          echo "current_version=$CURRENT" >> $GITHUB_OUTPUT
+          echo "Current Traefik version: $CURRENT"
+
+          # Query Docker Hub for latest traefik tag (v3.x line)
+          LATEST=$(curl -s "https://registry.hub.docker.com/v2/namespaces/library/repositories/traefik/tags?page_size=50&ordering=last_updated" \
+            | jq -r '.results[].name' \
+            | grep -E '^v3\.[0-9]+\.[0-9]+$' \
+            | sed 's/^v//' \
+            | sort -V \
+            | tail -1)
+
+          echo "Latest Traefik v3 version: $LATEST"
+
+          if [[ -z "$LATEST" || "$LATEST" == "null" ]]; then
+            echo "Could not determine latest Traefik version"
+            echo "new_version=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          if [[ "$LATEST" != "$CURRENT" ]]; then
+            echo "New Traefik version available: $LATEST (current: $CURRENT)"
+            echo "new_version=$LATEST" >> $GITHUB_OUTPUT
+          else
+            echo "Traefik already up to date"
+            echo "new_version=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Summarise updates
+        id: summary
+        run: |
+          HAS_UPDATES="false"
+          if [[ -n "${{ steps.check-elastic.outputs.new_version }}" ]]; then
+            HAS_UPDATES="true"
+          fi
+          if [[ -n "${{ steps.check-traefik.outputs.new_version }}" ]]; then
+            HAS_UPDATES="true"
+          fi
+          echo "has_updates=$HAS_UPDATES" >> $GITHUB_OUTPUT
+          echo "Has updates: $HAS_UPDATES"
+
+  update-and-test:
+    name: Update Versions & Test
+    needs: check-version
+    if: needs.check-version.outputs.has_updates == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Update Elastic Stack version
+        if: needs.check-version.outputs.new_elastic_version != ''
+        env:
+          OLD_VERSION: ${{ needs.check-version.outputs.current_elastic_version }}
+          NEW_VERSION: ${{ needs.check-version.outputs.new_elastic_version }}
+        run: |
+          echo "Updating Elastic Stack: $OLD_VERSION -> $NEW_VERSION"
+
+          # Update workflow file defaults
+          sed -i "s/default: '${OLD_VERSION}'/default: '${NEW_VERSION}'/g" \
+            .github/workflows/test-direct.yml \
+            .github/workflows/test-selfsigned.yml \
+            .github/workflows/test-letsencrypt.yml
+
+          # Update the fallback version in env blocks
+          sed -i "s/|| '${OLD_VERSION}'/|| '${NEW_VERSION}'/g" \
+            .github/workflows/test-direct.yml \
+            .github/workflows/test-selfsigned.yml \
+            .github/workflows/test-letsencrypt.yml
+
+          # Update .env.example if it contains the version
+          if grep -q "STACK_VERSION=${OLD_VERSION}" .env.example 2>/dev/null; then
+            sed -i "s/STACK_VERSION=${OLD_VERSION}/STACK_VERSION=${NEW_VERSION}/" .env.example
+          fi
+
+          echo "Elastic version updated in all files"
+          git diff --stat
+
+      - name: Update Traefik version
+        if: needs.check-version.outputs.new_traefik_version != ''
+        env:
+          OLD_VERSION: ${{ needs.check-version.outputs.current_traefik_version }}
+          NEW_VERSION: ${{ needs.check-version.outputs.new_traefik_version }}
+        run: |
+          echo "Updating Traefik: $OLD_VERSION -> $NEW_VERSION"
+          sed -i "s/traefik:v${OLD_VERSION}/traefik:v${NEW_VERSION}/" docker-compose.1.traefik.yaml
+          echo "Traefik version updated"
+          git diff --stat
+
+      # =====================================================
+      # Test Self-Signed Mode
+      # =====================================================
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Increase vm.max_map_count
+        run: sudo sysctl -w vm.max_map_count=262144
+
+      - name: Test self-signed mode
+        id: test-selfsigned
+        env:
+          STACK_VERSION: ${{ needs.check-version.outputs.new_elastic_version || needs.check-version.outputs.current_elastic_version }}
+        run: |
+          echo "=== Testing Self-Signed Mode ==="
+
+          # Configure /etc/hosts
+          sudo tee -a /etc/hosts << EOF
+          127.0.0.1 es.test.local
+          127.0.0.1 kibana.test.local
+          127.0.0.1 fleet.test.local
+          127.0.0.1 apm.test.local
+          127.0.0.1 agent.test.local
+          127.0.0.1 proxy.test.local
+          EOF
+
+          cat > .env << EOF
+          INGRESS_MODE=selfsigned
+          ACME_EMAIL=test@example.com
+          CF_DNS_API_TOKEN=
+          ELASTIC_PASSWORD=TestPassword123!
+          KIBANA_PASSWORD=TestPassword123!
+          APM_SECRET_TOKEN=TestAPMToken123!
+          STACK_VERSION=${STACK_VERSION}
+          CLUSTER_NAME=test-cluster
+          LICENSE=basic
+          ES_DOMAIN_NAME=es.test.local
+          KIBANA_DOMAIN_NAME=kibana.test.local
+          FLEET_DOMAIN_NAME=fleet.test.local
+          APM_DOMAIN_NAME=apm.test.local
+          AGENT_DOMAIN_NAME=agent.test.local
+          TRAEFIK_DOMAIN_NAME=proxy.test.local
+          ALLOWED_SYSLOG_IPS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+          KB_MEM_LIMIT=1073741824
+          ES_MEM_LIMIT=2147483648
+          FLEET_MEM_LIMIT=1073741824
+          AGENT_MEM_LIMIT=1073741824
+          KB_SECURITY_ENCRYPTIONKEY=fRDzAmciu0Sv3c0S8lKxJMrxJbEoEKG1
+          KB_REPORTING_ENCRYPTIONKEY=Ih2qXq9iuXdiXg1jo4yXZV8gJWc6stzH
+          KB_OBJECTS_ENCRYPTIONKEY=ny6tYXoI3lYrRcpgMSMQAkrSBen8dE9K
+          EOF
+
+          docker compose up -d
+
+          echo "Waiting for services..."
+          timeout 600 bash -c '
+            while true; do
+              health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-fleet-server-1 2>/dev/null || echo "unknown")
+              if [[ "$health" == "healthy" ]]; then
+                echo "All core services healthy"
+                exit 0
+              fi
+              echo "Fleet Server health: $health"
+              sleep 15
+            done
+          '
+
+          # Extract CA and run tests
+          docker compose cp setup:/usr/share/elasticsearch/config/certs/ca/ca.crt ./ca.crt
+
+          export ELASTICSEARCH_URL="https://es.test.local"
+          export KIBANA_URL="https://kibana.test.local"
+          export FLEET_URL="https://fleet.test.local"
+          export ELASTIC_PASSWORD="TestPassword123!"
+          export CA_CERT="./ca.crt"
+          export INGRESS_MODE="selfsigned"
+
+          bash .github/scripts/test-stack.sh all
+
+      - name: Collect selfsigned logs on failure
+        if: failure() && steps.test-selfsigned.outcome == 'failure'
+        run: |
+          echo "=== Self-Signed Mode Failure Logs ==="
+          docker compose logs --tail=50
+          docker compose ps -a
+
+      - name: Tear down self-signed stack
+        if: always()
+        run: |
+          docker compose down -v --remove-orphans 2>/dev/null || true
+          docker system prune -f 2>/dev/null || true
+
+      # =====================================================
+      # Test Direct Mode
+      # =====================================================
+      - name: Test direct mode
+        id: test-direct
+        env:
+          STACK_VERSION: ${{ needs.check-version.outputs.new_elastic_version || needs.check-version.outputs.current_elastic_version }}
+        run: |
+          echo "=== Testing Direct Mode ==="
+
+          cat > .env << EOF
+          INGRESS_MODE=direct
+          ACME_EMAIL=test@example.com
+          CF_DNS_API_TOKEN=
+          ELASTIC_PASSWORD=TestPassword123!
+          KIBANA_PASSWORD=TestPassword123!
+          APM_SECRET_TOKEN=TestAPMToken123!
+          STACK_VERSION=${STACK_VERSION}
+          CLUSTER_NAME=test-cluster
+          LICENSE=basic
+          KIBANA_DOMAIN_NAME=kibana.local
+          ES_DOMAIN_NAME=es.local
+          FLEET_DOMAIN_NAME=fleet.local
+          APM_DOMAIN_NAME=apm.local
+          AGENT_DOMAIN_NAME=agent.local
+          TRAEFIK_DOMAIN_NAME=traefik.local
+          ALLOWED_SYSLOG_IPS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+          KB_MEM_LIMIT=1073741824
+          ES_MEM_LIMIT=2147483648
+          FLEET_MEM_LIMIT=1073741824
+          AGENT_MEM_LIMIT=1073741824
+          KB_SECURITY_ENCRYPTIONKEY=fRDzAmciu0Sv3c0S8lKxJMrxJbEoEKG1
+          KB_REPORTING_ENCRYPTIONKEY=Ih2qXq9iuXdiXg1jo4yXZV8gJWc6stzH
+          KB_OBJECTS_ENCRYPTIONKEY=ny6tYXoI3lYrRcpgMSMQAkrSBen8dE9K
+          EOF
+
+          docker compose up -d
+
+          echo "Waiting for services..."
+          timeout 600 bash -c '
+            while true; do
+              health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-fleet-server-1 2>/dev/null || echo "unknown")
+              if [[ "$health" == "healthy" ]]; then
+                echo "All core services healthy"
+                exit 0
+              fi
+              echo "Fleet Server health: $health"
+              sleep 15
+            done
+          '
+
+          # Extract CA and run tests
+          docker compose cp setup:/usr/share/elasticsearch/config/certs/ca/ca.crt ./ca.crt
+
+          export ELASTICSEARCH_URL="https://localhost:9200"
+          export KIBANA_URL="https://localhost:5601"
+          export FLEET_URL="https://localhost:8220"
+          export ELASTIC_PASSWORD="TestPassword123!"
+          export CA_CERT="./ca.crt"
+          export INGRESS_MODE="direct"
+
+          bash .github/scripts/test-stack.sh all
+
+      - name: Collect direct logs on failure
+        if: failure() && steps.test-direct.outcome == 'failure'
+        run: |
+          echo "=== Direct Mode Failure Logs ==="
+          docker compose logs --tail=50
+          docker compose ps -a
+
+      - name: Tear down direct stack
+        if: always()
+        run: |
+          docker compose down -v --remove-orphans 2>/dev/null || true
+          docker system prune -f 2>/dev/null || true
+
+      # =====================================================
+      # Test Let's Encrypt Mode (config validation only)
+      # =====================================================
+      - name: Validate letsencrypt configuration
+        id: test-letsencrypt
+        env:
+          STACK_VERSION: ${{ needs.check-version.outputs.new_elastic_version || needs.check-version.outputs.current_elastic_version }}
+        run: |
+          echo "=== Validating Let's Encrypt Configuration ==="
+          echo "Full Let's Encrypt testing requires DNS and secrets."
+          echo "Validating Traefik config syntax and compose file parsing..."
+
+          cat > .env << EOF
+          INGRESS_MODE=letsencrypt
+          ACME_EMAIL=test@example.com
+          CF_DNS_API_TOKEN=placeholder
+          ELASTIC_PASSWORD=TestPassword123!
+          KIBANA_PASSWORD=TestPassword123!
+          APM_SECRET_TOKEN=TestAPMToken123!
+          STACK_VERSION=${STACK_VERSION}
+          CLUSTER_NAME=test-cluster
+          LICENSE=basic
+          ES_DOMAIN_NAME=es.example.com
+          KIBANA_DOMAIN_NAME=kibana.example.com
+          FLEET_DOMAIN_NAME=fleet.example.com
+          APM_DOMAIN_NAME=apm.example.com
+          AGENT_DOMAIN_NAME=agent.example.com
+          TRAEFIK_DOMAIN_NAME=proxy.example.com
+          ALLOWED_SYSLOG_IPS=0.0.0.0/0
+          KB_MEM_LIMIT=1073741824
+          ES_MEM_LIMIT=2147483648
+          FLEET_MEM_LIMIT=1073741824
+          AGENT_MEM_LIMIT=1073741824
+          KB_SECURITY_ENCRYPTIONKEY=fRDzAmciu0Sv3c0S8lKxJMrxJbEoEKG1
+          KB_REPORTING_ENCRYPTIONKEY=Ih2qXq9iuXdiXg1jo4yXZV8gJWc6stzH
+          KB_OBJECTS_ENCRYPTIONKEY=ny6tYXoI3lYrRcpgMSMQAkrSBen8dE9K
+          EOF
+
+          # Validate docker compose config parses correctly
+          docker compose config > /dev/null
+          echo "Docker Compose configuration valid for letsencrypt mode"
+
+          # Verify correct Traefik config is selected
+          docker compose config | grep -q "traefik-letsencrypt.yml"
+          echo "Correct Traefik config file selected"
+
+          # Verify ACME configuration exists
+          grep -q "certificatesResolvers" configurations/traefik/traefik-letsencrypt.yml
+          echo "ACME certificate resolver configured"
+
+          echo "Let's Encrypt configuration validation passed"
+
+      # =====================================================
+      # Create PR
+      # =====================================================
+      - name: Create pull request
+        if: success() && github.event.inputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_ELASTIC: ${{ needs.check-version.outputs.new_elastic_version }}
+          OLD_ELASTIC: ${{ needs.check-version.outputs.current_elastic_version }}
+          NEW_TRAEFIK: ${{ needs.check-version.outputs.new_traefik_version }}
+          OLD_TRAEFIK: ${{ needs.check-version.outputs.current_traefik_version }}
+        run: |
+          BRANCH="chore/version-update"
+          TITLE_PARTS=()
+          BODY_PARTS=()
+
+          if [[ -n "$NEW_ELASTIC" ]]; then
+            TITLE_PARTS+=("Elastic Stack ${NEW_ELASTIC}")
+            BODY_PARTS+=("- Elastic Stack: \`${OLD_ELASTIC}\` -> \`${NEW_ELASTIC}\`")
+          fi
+          if [[ -n "$NEW_TRAEFIK" ]]; then
+            TITLE_PARTS+=("Traefik ${NEW_TRAEFIK}")
+            BODY_PARTS+=("- Traefik: \`${OLD_TRAEFIK}\` -> \`${NEW_TRAEFIK}\`")
+          fi
+
+          TITLE="chore: update $(IFS=', '; echo "${TITLE_PARTS[*]}")"
+
+          # Check for existing open PR
+          EXISTING=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' 2>/dev/null || echo "")
+          if [[ -n "$EXISTING" ]]; then
+            echo "Existing PR #${EXISTING} found, updating branch..."
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout -B "$BRANCH"
+          git add -A
+          git commit -m "$TITLE" || { echo "No changes to commit"; exit 0; }
+          git push -u origin "$BRANCH" --force
+
+          PR_BODY="## Version Updates
+
+          Updates detected by automated version check.
+
+          ## Testing
+
+          - [x] Self-signed mode: full test suite passed
+          - [x] Direct mode: full test suite passed
+          - [x] Let's Encrypt mode: configuration validated
+
+          This PR was automatically created by the version check workflow."
+
+          if [[ -n "$EXISTING" ]]; then
+            echo "Updated existing PR #${EXISTING}"
+          else
+            gh pr create --title "$TITLE" --body "$PR_BODY"
+          fi

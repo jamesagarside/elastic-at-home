@@ -1,0 +1,26 @@
+# Secrets and local config
+.env
+.env-e
+.env.pi
+.env.local
+
+# AI tooling (not part of this project)
+.claude/
+.claude-flow/
+.gemini/
+.mcp.json
+CLAUDE.md
+openspec/
+
+# Generated/local
+.beads/
+.structurizr
+workspace.json
+
+# GitHub AI prompts/skills (local development only)
+.github/prompts/
+.github/skills/
+
+# Blog drafts
+BLOG.md
+example-blog.md

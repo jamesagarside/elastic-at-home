@@ -1,0 +1,454 @@
+name: Test Let's Encrypt Deployment
+
+on:
+  # Manual trigger only - to avoid Let's Encrypt rate limits
+  workflow_dispatch:
+    inputs:
+      stack_version:
+        description: 'Elastic Stack version to test'
+        required: false
+        default: '9.3.2'
+      test_domain:
+        description: 'Base domain for testing (e.g., siem.example.com)'
+        required: false
+        default: 'ci.jgarside.co.uk'
+      use_staging:
+        description: 'Use Let''s Encrypt staging (recommended for testing)'
+        required: false
+        default: true
+        type: boolean
+      debug:
+        description: 'Enable debug output'
+        required: false
+        default: false
+        type: boolean
+
+  # Optional: scheduled weekly test
+  schedule:
+    # Run weekly on Sunday at 3am UTC
+    - cron: '0 3 * * 0'
+
+env:
+  STACK_VERSION: ${{ github.event.inputs.stack_version || '9.3.2' }}
+  # Default domain for scheduled runs - override via workflow_dispatch
+  TEST_DOMAIN: ${{ github.event.inputs.test_domain || vars.TEST_DOMAIN }}
+
+jobs:
+  validate-inputs:
+    name: Validate Configuration
+    runs-on: ubuntu-latest
+    outputs:
+      domain_valid: ${{ steps.validate.outputs.domain_valid }}
+
+    steps:
+      - name: Validate secrets and inputs
+        id: validate
+        env:
+          CF_TOKEN: ${{ secrets.CF_DNS_API_TOKEN }}
+          DOMAIN: ${{ env.TEST_DOMAIN }}
+          ACME_SECRET: ${{ secrets.ACME_EMAIL }}
+          ACME_VAR: ${{ vars.ACME_EMAIL }}
+        run: |
+          errors=0
+
+          if [[ -z "$CF_TOKEN" ]]; then
+            echo "::error::Missing required secret: CF_DNS_API_TOKEN"
+            errors=$((errors + 1))
+          fi
+
+          if [[ -z "$DOMAIN" ]]; then
+            echo "::error::Missing required input: test_domain (or set TEST_DOMAIN repository variable)"
+            errors=$((errors + 1))
+          fi
+
+          if [[ -z "$ACME_SECRET" && -z "$ACME_VAR" ]]; then
+            echo "::warning::No ACME_EMAIL set, using default"
+          fi
+
+          if [[ $errors -gt 0 ]]; then
+            echo "domain_valid=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          echo "domain_valid=true" >> $GITHUB_OUTPUT
+          echo "Configuration validated successfully"
+
+  test-letsencrypt:
+    name: Let's Encrypt Certificate Mode
+    needs: validate-inputs
+    if: needs.validate-inputs.outputs.domain_valid == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Verify Docker Compose version
+        run: |
+          echo "Docker Compose version:"
+          docker compose version
+
+      - name: Configure domain variables
+        id: domains
+        env:
+          BASE_DOMAIN: ${{ env.TEST_DOMAIN }}
+        run: |
+          echo "kibana_domain=kibana.${BASE_DOMAIN}" >> $GITHUB_OUTPUT
+          echo "es_domain=elasticsearch.${BASE_DOMAIN}" >> $GITHUB_OUTPUT
+          echo "fleet_domain=fleet.${BASE_DOMAIN}" >> $GITHUB_OUTPUT
+          echo "apm_domain=apm.${BASE_DOMAIN}" >> $GITHUB_OUTPUT
+          echo "agent_domain=agent.${BASE_DOMAIN}" >> $GITHUB_OUTPUT
+          echo "traefik_domain=proxy.${BASE_DOMAIN}" >> $GITHUB_OUTPUT
+
+      - name: Create .env file
+        env:
+          STACK_VER: ${{ env.STACK_VERSION }}
+          LE_ACME_EMAIL: ${{ secrets.ACME_EMAIL || vars.ACME_EMAIL || 'test@example.com' }}
+          LE_CF_TOKEN: ${{ secrets.CF_DNS_API_TOKEN }}
+          LE_KIBANA: ${{ steps.domains.outputs.kibana_domain }}
+          LE_ES: ${{ steps.domains.outputs.es_domain }}
+          LE_FLEET: ${{ steps.domains.outputs.fleet_domain }}
+          LE_APM: ${{ steps.domains.outputs.apm_domain }}
+          LE_AGENT: ${{ steps.domains.outputs.agent_domain }}
+          LE_TRAEFIK: ${{ steps.domains.outputs.traefik_domain }}
+        run: |
+          cat > .env <<EOF
+          INGRESS_MODE=letsencrypt
+          ACME_EMAIL=${LE_ACME_EMAIL}
+          CF_DNS_API_TOKEN=${LE_CF_TOKEN}
+          ELASTIC_PASSWORD=TestPassword123!
+          KIBANA_PASSWORD=TestPassword123!
+          APM_SECRET_TOKEN=TestAPMToken123!
+          STACK_VERSION=${STACK_VER}
+          CLUSTER_NAME=test-cluster-le
+          LICENSE=basic
+          KIBANA_DOMAIN_NAME=${LE_KIBANA}
+          ES_DOMAIN_NAME=${LE_ES}
+          FLEET_DOMAIN_NAME=${LE_FLEET}
+          APM_DOMAIN_NAME=${LE_APM}
+          AGENT_DOMAIN_NAME=${LE_AGENT}
+          TRAEFIK_DOMAIN_NAME=${LE_TRAEFIK}
+          TRAEFIK_IP=
+          EXTERNAL_ES_PORT=443
+          EXTERNAL_FLEET_PORT=443
+          EXTERNAL_APM_PORT=443
+          ALLOWED_SYSLOG_IPS=0.0.0.0/0
+          KB_MEM_LIMIT=1073741824
+          ES_MEM_LIMIT=2147483648
+          FLEET_MEM_LIMIT=1073741824
+          AGENT_MEM_LIMIT=1073741824
+          KB_SECURITY_ENCRYPTIONKEY=fRDzAmciu0Sv3c0S8lKxJMrxJbEoEKG1
+          KB_REPORTING_ENCRYPTIONKEY=Ih2qXq9iuXdiXg1jo4yXZV8gJWc6stzH
+          KB_OBJECTS_ENCRYPTIONKEY=ny6tYXoI3lYrRcpgMSMQAkrSBen8dE9K
+          EOF
+          sed -i 's/^[[:space:]]*//' .env
+
+      - name: Configure Traefik for staging (if enabled)
+        if: github.event.inputs.use_staging == 'true'
+        run: |
+          # Modify traefik config to use staging server
+          if [[ -f configurations/traefik/traefik-letsencrypt.yml ]]; then
+            echo "Configuring Traefik for Let's Encrypt staging..."
+            # Insert caServer line into the existing acme block (after the storage: line)
+            sed -i '/^\s*storage:.*acme\.json/a\      caServer: https://acme-staging-v02.api.letsencrypt.org/directory' configurations/traefik/traefik-letsencrypt.yml
+            echo "Updated traefik config:"
+            cat configurations/traefik/traefik-letsencrypt.yml
+          fi
+
+      - name: Increase vm.max_map_count for Elasticsearch
+        run: |
+          sudo sysctl -w vm.max_map_count=262144
+
+      - name: Start Elastic Stack
+        run: |
+          echo "Starting Elastic Stack with Let's Encrypt certificates..."
+          docker compose up -d --wait --wait-timeout 300 || {
+            echo "Initial startup had issues, checking container status..."
+            docker compose ps -a
+            if docker compose ps fleet-server --status running 2>/dev/null | grep -q fleet-server; then
+              echo "Fleet server recovered after restart"
+            else
+              echo "Fleet server failed to start"
+              docker compose logs fleet-server --tail=30
+              exit 1
+            fi
+          }
+          echo "Stack started, waiting for services to initialize..."
+
+      - name: Wait for Setup container to complete
+        run: |
+          echo "Waiting for setup container to complete..."
+          timeout 300 bash -c '
+            while true; do
+              # Check if setup container has exited (not running)
+              if ! docker compose ps setup --status running 2>/dev/null | grep -q setup; then
+                # Container is not running, check exit code
+                exit_code=$(docker inspect --format="{{.State.ExitCode}}" elastic-at-home-setup-1 2>/dev/null || echo "unknown")
+                if [[ "$exit_code" == "0" ]]; then
+                  echo "Setup completed successfully"
+                  exit 0
+                elif [[ "$exit_code" == "unknown" ]]; then
+                  echo "Setup container not found yet, waiting..."
+                else
+                  echo "Setup failed with exit code $exit_code"
+                  docker compose logs setup
+                  exit 1
+                fi
+              else
+                echo "Setup container still running..."
+              fi
+              sleep 10
+            done
+          '
+
+      - name: Wait for certificate issuance
+        run: |
+          echo "Waiting for Let's Encrypt certificate issuance (this may take a few minutes)..."
+          echo "Monitoring Traefik logs and acme.json for certificate status..."
+
+          # Write check script to avoid nested quoting issues with bash -c
+          cat > /tmp/wait-cert.sh <<'CERTSCRIPT'
+          while true; do
+            # First check if Traefik is actually running
+            if ! docker compose ps traefik --status running 2>/dev/null | grep -q traefik; then
+              echo "ERROR: Traefik container is not running!"
+              docker compose logs traefik --tail=50
+              exit 1
+            fi
+
+            # Primary check: look for an actual issued certificate (has a "main" domain entry)
+            # The ACME JSON skeleton contains "Certificates" keys even before any cert is issued,
+            # so we must check for "main" which only appears with a real domain cert
+            if docker compose exec -T traefik sh -c 'cat /letsencrypt/acme.json 2>/dev/null | grep -q "\"main\":"' 2>/dev/null; then
+              echo "Certificate issued!"
+              # Safely extract only domain names, nothing sensitive
+              docker compose exec -T traefik sh -c 'cat /letsencrypt/acme.json | grep -o "\"main\":\"[^\"]*\"" | head -5' 2>/dev/null || true
+              exit 0
+            fi
+
+            # Secondary check: Traefik logs for status or errors
+            LOGS=$(docker compose logs traefik 2>&1)
+
+            # Check for ACME errors in logs
+            if echo "$LOGS" | grep -qiE "unable to obtain|ACME error|challenge failed|acme:.*error|Unable to obtain ACME|presented for domain"; then
+              echo "Certificate issuance failed! Traefik ACME logs:"
+              echo "$LOGS" | grep -iE "error|acme|challenge|cert" | tail -20
+              exit 1
+            fi
+
+            # Show recent log activity for debugging
+            RECENT=$(echo "$LOGS" | tail -3)
+            if [[ -n "$RECENT" ]]; then
+              echo "Latest Traefik log: $(echo "$RECENT" | tail -1 | cut -c1-200)"
+            fi
+
+            echo "Waiting for certificate... (checking every 30s)"
+            sleep 30
+          done
+          CERTSCRIPT
+          chmod +x /tmp/wait-cert.sh
+          timeout 600 bash /tmp/wait-cert.sh
+
+      - name: Wait for Elasticsearch to be healthy
+        run: |
+          echo "Waiting for Elasticsearch to be healthy..."
+          timeout 300 bash -c '
+            while true; do
+              health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-es01-1 2>/dev/null || echo "unknown")
+              echo "Elasticsearch health: $health"
+              if [[ "$health" == "healthy" ]]; then
+                echo "Elasticsearch is healthy"
+                exit 0
+              fi
+              sleep 10
+            done
+          '
+
+      - name: Wait for Kibana to be healthy
+        run: |
+          echo "Waiting for Kibana to be healthy..."
+          timeout 300 bash -c '
+            while true; do
+              health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-kibana-1 2>/dev/null || echo "unknown")
+              echo "Kibana health: $health"
+              if [[ "$health" == "healthy" ]]; then
+                echo "Kibana is healthy"
+                exit 0
+              fi
+              sleep 10
+            done
+          '
+
+      - name: Wait for Fleet Server to be healthy
+        run: |
+          echo "Waiting for Fleet Server to be healthy..."
+          timeout 300 bash -c '
+            while true; do
+              health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-fleet-server-1 2>/dev/null || echo "unknown")
+              echo "Fleet Server health: $health"
+              if [[ "$health" == "healthy" ]]; then
+                echo "Fleet Server is healthy"
+                exit 0
+              fi
+              sleep 10
+            done
+          '
+
+      - name: Wait for Agent to be running
+        run: |
+          echo "Waiting for Elastic Agent..."
+          sleep 30
+
+      - name: Show running containers
+        run: |
+          docker compose ps -a
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq openssl
+
+      - name: Verify Let's Encrypt certificate
+        run: |
+          echo "Verifying Let's Encrypt certificate for Kibana..."
+
+          KIBANA_DOMAIN="${{ steps.domains.outputs.kibana_domain }}"
+
+          # Check certificate chain
+          echo | openssl s_client -connect ${KIBANA_DOMAIN}:443 -servername ${KIBANA_DOMAIN} 2>/dev/null | \
+            openssl x509 -noout -issuer -subject -dates
+
+          # Verify it's from Let's Encrypt (or staging)
+          ISSUER=$(echo | openssl s_client -connect ${KIBANA_DOMAIN}:443 -servername ${KIBANA_DOMAIN} 2>/dev/null | \
+            openssl x509 -noout -issuer 2>/dev/null || echo "unknown")
+
+          echo "Certificate issuer: $ISSUER"
+
+          if echo "$ISSUER" | grep -qiE "(let's encrypt|letsencrypt|staging|artificial)"; then
+            echo "Certificate is from Let's Encrypt"
+          else
+            echo "::error::Certificate is NOT from Let's Encrypt (issuer: $ISSUER). Traefik may have fallen back to a default/self-signed cert."
+            exit 1
+          fi
+
+      - name: Run full test suite
+        id: tests
+        run: |
+          export ELASTICSEARCH_URL="https://${{ steps.domains.outputs.es_domain }}"
+          export KIBANA_URL="https://${{ steps.domains.outputs.kibana_domain }}"
+          export FLEET_URL="https://${{ steps.domains.outputs.fleet_domain }}"
+          export ELASTIC_PASSWORD="TestPassword123!"
+          export INGRESS_MODE="letsencrypt"
+          export DEBUG="${{ github.event.inputs.debug || 'false' }}"
+          # No CA_CERT needed for Let's Encrypt
+
+          # Run full test suite - includes certificates, elasticsearch, kibana, fleet, and agent tests
+          bash .github/scripts/test-stack.sh all
+
+      - name: Test external HTTPS access
+        run: |
+          echo "Testing external HTTPS access to services..."
+
+          # Test Kibana via HTTPS (-k for staging LE certs)
+          KIBANA_STATUS=$(curl -sk -o /dev/null -w "%{http_code}" \
+            "https://${{ steps.domains.outputs.kibana_domain }}/api/status" \
+            -u "elastic:TestPassword123!" 2>/dev/null || echo "000")
+
+          echo "Kibana HTTPS status: $KIBANA_STATUS"
+
+          if [[ "$KIBANA_STATUS" == "200" ]]; then
+            echo "Kibana accessible via HTTPS with valid certificate"
+          else
+            echo "Warning: Kibana returned status $KIBANA_STATUS"
+          fi
+
+          # Test Fleet via HTTPS (-k for staging LE certs)
+          FLEET_STATUS=$(curl -sk -o /dev/null -w "%{http_code}" \
+            "https://${{ steps.domains.outputs.fleet_domain }}/api/status" 2>/dev/null || echo "000")
+
+          echo "Fleet HTTPS status: $FLEET_STATUS"
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== Docker Compose Logs ==="
+          docker compose logs --tail=100
+
+          echo ""
+          echo "=== Container Status ==="
+          docker compose ps -a
+
+          echo ""
+          echo "=== Traefik Logs (ACME) ==="
+          docker compose logs traefik --tail=100
+
+          echo ""
+          echo "=== Elasticsearch Logs ==="
+          docker compose logs es01 --tail=50
+
+          echo ""
+          echo "=== Kibana Logs ==="
+          docker compose logs kibana --tail=50
+
+          echo ""
+          echo "=== Fleet Server Logs ==="
+          docker compose logs fleet-server --tail=50
+
+      - name: Upload logs artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-logs-letsencrypt
+          path: |
+            docker-compose-logs.txt
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose down -v --remove-orphans
+          docker system prune -f
+
+  notify-failure:
+    name: Notify on Failure
+    needs: [test-letsencrypt]
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Create issue on failure
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `Let's Encrypt Test Failed - ${new Date().toISOString().split('T')[0]}`;
+            const body = `
+            ## Scheduled Let's Encrypt Test Failed
+
+            **Workflow Run:** [#${context.runNumber}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+            **Branch:** ${context.ref}
+            **Triggered:** ${context.eventName}
+
+            Please check the workflow logs for details.
+            `;
+
+            // Check if issue already exists
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['ci-failure', 'letsencrypt']
+            });
+
+            if (issues.data.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body,
+                labels: ['ci-failure', 'letsencrypt']
+              });
+            }

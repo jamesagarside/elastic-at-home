@@ -1,0 +1,69 @@
+services:
+  traefik:
+    depends_on:
+      setup:
+        condition: service_healthy
+    image: traefik:v3.6.4
+    container_name: traefik
+    # ==========================================================================
+    # Traefik Configuration File Selection
+    # ==========================================================================
+    # Config files are auto-selected based on INGRESS_MODE env var (.env file).
+    # Each mode has a static config (.yml) and dynamic config (-dynamic.yaml):
+    #
+    # INGRESS_MODE=selfsigned (default):
+    #   - traefik-selfsigned.yml         → Static config (entrypoints, providers)
+    #   - traefik-selfsigned-dynamic.yaml → Dynamic config (TLS certs, transports)
+    #   - Uses ES CA-signed certificates, works in air-gapped environments
+    #   - Access via hostnames (kibana.example.com, etc.)
+    #
+    # INGRESS_MODE=letsencrypt:
+    #   - traefik-letsencrypt.yml         → Static config (+ ACME resolver)
+    #   - traefik-letsencrypt-dynamic.yaml → Dynamic config (transports only)
+    #   - Uses Let's Encrypt via Cloudflare DNS challenge
+    #   - Requires: CF_DNS_API_TOKEN, ACME_EMAIL, public DNS records
+    #
+    # INGRESS_MODE=direct:
+    #   - traefik-direct.yml              → Static config (+ port entrypoints)
+    #   - traefik-direct-dynamic.yaml     → Dynamic config (TLS, routers, services)
+    #   - Port-based routing for IP access (no DNS required)
+    #   - Access via IP:port (https://192.168.1.x:9200, etc.)
+    # ==========================================================================
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+      - "514:514/tcp"
+      - "514:514/udp"
+      # Direct access ports (used when INGRESS_MODE=direct)
+      - "9200:9200"
+      - "5601:5601"
+      - "8220:8220"
+      - "8200:8200"
+    environment:
+      - CF_DNS_API_TOKEN=${CF_DNS_API_TOKEN}
+      # ACME email for Let's Encrypt (only used when INGRESS_MODE=letsencrypt)
+      # Traefik reads env vars in the format TRAEFIK_<SECTION>_<KEY> to override static config
+      - TRAEFIK_CERTIFICATESRESOLVERS_LETSENCRYPT_ACME_EMAIL=${ACME_EMAIL}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - letsencrypt:/letsencrypt
+      - certs:/certs:ro
+      - ./configurations/traefik/traefik-${INGRESS_MODE:-selfsigned}.yml:/etc/traefik/traefik.yml:ro
+      - ./configurations/traefik/traefik-${INGRESS_MODE:-selfsigned}-dynamic.yaml:/etc/traefik/dynamic.yaml:ro
+    networks:
+      - elastic
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`${TRAEFIK_DOMAIN_NAME}`)"
+      - "traefik.http.routers.dashboard.entrypoints=websecure"
+      - "traefik.http.routers.dashboard.tls.certresolver=${INGRESS_MODE:-}"
+      - "traefik.http.routers.dashboard.service=api@internal"
+    healthcheck:
+      test: ["CMD-SHELL", "traefik healthcheck --ping"]
+      interval: 10s
+      timeout: 10s
+
+volumes:
+  letsencrypt:
+    driver: local

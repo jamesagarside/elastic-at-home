@@ -1,0 +1,294 @@
+name: Test Direct Access Deployment
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docker-compose*.yaml'
+      - 'docker-compose*.yml'
+      - 'configurations/traefik/traefik-direct*'
+      - 'configurations/elastic/fleet-configuration.yaml'
+      - 'configurations/elastic/env_files/.env.direct'
+      - '.env.example'
+      - '.github/workflows/test-direct.yml'
+      - '.github/scripts/test-stack.sh'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docker-compose*.yaml'
+      - 'docker-compose*.yml'
+      - 'configurations/traefik/traefik-direct*'
+      - 'configurations/elastic/fleet-configuration.yaml'
+      - 'configurations/elastic/env_files/.env.direct'
+      - '.env.example'
+      - '.github/workflows/test-direct.yml'
+      - '.github/scripts/test-stack.sh'
+  workflow_dispatch:
+    inputs:
+      stack_version:
+        description: 'Elastic Stack version to test'
+        required: false
+        default: '9.3.2'
+      debug:
+        description: 'Enable debug output'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  # Default stack version (can be overridden by workflow_dispatch)
+  STACK_VERSION: ${{ github.event.inputs.stack_version || '9.3.2' }}
+
+jobs:
+  test-direct:
+    name: Direct Access Mode (Port-Based)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Verify Docker Compose version
+        run: |
+          echo "Docker Compose version:"
+          docker compose version
+
+      - name: Validate .env.example completeness
+        run: bash .github/scripts/validate-env.sh
+
+      - name: Create .env file
+        env:
+          STACK_VER: ${{ env.STACK_VERSION }}
+        run: |
+          cat > .env <<EOF
+          INGRESS_MODE=direct
+          ACME_EMAIL=test@example.com
+          CF_DNS_API_TOKEN=
+          ELASTIC_PASSWORD=TestPassword123!
+          KIBANA_PASSWORD=TestPassword123!
+          APM_SECRET_TOKEN=TestAPMToken123!
+          STACK_VERSION=${STACK_VER}
+          CLUSTER_NAME=test-cluster
+          LICENSE=basic
+          KIBANA_DOMAIN_NAME=kibana.local
+          ES_DOMAIN_NAME=es.local
+          FLEET_DOMAIN_NAME=fleet.local
+          APM_DOMAIN_NAME=apm.local
+          AGENT_DOMAIN_NAME=agent.local
+          TRAEFIK_DOMAIN_NAME=traefik.local
+          TRAEFIK_IP=
+          EXTERNAL_ES_PORT=9200
+          EXTERNAL_FLEET_PORT=8220
+          EXTERNAL_APM_PORT=8200
+          ALLOWED_SYSLOG_IPS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+          KB_MEM_LIMIT=1073741824
+          ES_MEM_LIMIT=2147483648
+          FLEET_MEM_LIMIT=1073741824
+          AGENT_MEM_LIMIT=1073741824
+          KB_SECURITY_ENCRYPTIONKEY=fRDzAmciu0Sv3c0S8lKxJMrxJbEoEKG1
+          KB_REPORTING_ENCRYPTIONKEY=Ih2qXq9iuXdiXg1jo4yXZV8gJWc6stzH
+          KB_OBJECTS_ENCRYPTIONKEY=ny6tYXoI3lYrRcpgMSMQAkrSBen8dE9K
+          EOF
+          sed -i 's/^[[:space:]]*//' .env
+
+      - name: Increase vm.max_map_count for Elasticsearch
+        run: |
+          sudo sysctl -w vm.max_map_count=262144
+
+      - name: Start Elastic Stack
+        run: |
+          echo "Starting Elastic Stack with direct access mode (port-based routing)..."
+          # Use --wait with a timeout to let Docker handle restart policies
+          # This avoids failing on transient startup races (e.g. Elastic Agent
+          # monitoring port 6791 bind conflict) by giving containers time to
+          # restart and become healthy
+          docker compose up -d --wait --wait-timeout 300 || {
+            echo "Initial startup had issues, checking container status..."
+            docker compose ps -a
+            # If fleet-server restarted and is now healthy, continue
+            if docker compose ps fleet-server --status running 2>/dev/null | grep -q fleet-server; then
+              echo "Fleet server recovered after restart"
+            else
+              echo "Fleet server failed to start"
+              docker compose logs fleet-server --tail=30
+              exit 1
+            fi
+          }
+          echo "Stack started, waiting for services to initialize..."
+
+      - name: Wait for Setup container to complete
+        run: |
+          echo "Waiting for setup container to complete certificate generation..."
+          timeout 300 bash -c '
+            while true; do
+              # Check if setup container has exited (not running)
+              if ! docker compose ps setup --status running 2>/dev/null | grep -q setup; then
+                # Container is not running, check exit code
+                exit_code=$(docker inspect --format="{{.State.ExitCode}}" elastic-at-home-setup-1 2>/dev/null || echo "unknown")
+                if [[ "$exit_code" == "0" ]]; then
+                  echo "Setup completed successfully"
+                  exit 0
+                elif [[ "$exit_code" == "unknown" ]]; then
+                  echo "Setup container not found yet, waiting..."
+                else
+                  echo "Setup failed with exit code $exit_code"
+                  docker compose logs setup
+                  exit 1
+                fi
+              else
+                echo "Setup container still running..."
+              fi
+              sleep 10
+            done
+          '
+
+      - name: Wait for Elasticsearch to be healthy
+        run: |
+          echo "Waiting for Elasticsearch to be healthy..."
+          timeout 300 bash -c '
+            while true; do
+              # Check health via docker inspect
+              health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-es01-1 2>/dev/null || echo "unknown")
+              echo "Elasticsearch health: $health"
+              if [[ "$health" == "healthy" ]]; then
+                echo "Elasticsearch is healthy"
+                exit 0
+              fi
+              sleep 10
+            done
+          '
+
+      - name: Wait for Kibana to be healthy
+        run: |
+          echo "Waiting for Kibana to be healthy..."
+          timeout 300 bash -c '
+            while true; do
+              health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-kibana-1 2>/dev/null || echo "unknown")
+              echo "Kibana health: $health"
+              if [[ "$health" == "healthy" ]]; then
+                echo "Kibana is healthy"
+                exit 0
+              fi
+              sleep 10
+            done
+          '
+
+      - name: Wait for Fleet Server to be healthy
+        run: |
+          echo "Waiting for Fleet Server to be healthy..."
+          timeout 300 bash -c '
+            while true; do
+              health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-fleet-server-1 2>/dev/null || echo "unknown")
+              echo "Fleet Server health: $health"
+              if [[ "$health" == "healthy" ]]; then
+                echo "Fleet Server is healthy"
+                exit 0
+              fi
+              sleep 10
+            done
+          '
+
+      - name: Wait for Agent to be running
+        run: |
+          echo "Waiting for Elastic Agent..."
+          sleep 30  # Give agent time to enroll
+
+      - name: Show running containers
+        run: |
+          docker compose ps -a
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq openssl
+
+      - name: Extract CA certificate
+        run: |
+          # Copy CA cert from the certs volume
+          docker compose cp setup:/usr/share/elasticsearch/config/certs/ca/ca.crt ./ca.crt
+          echo "CA Certificate extracted:"
+          openssl x509 -in ./ca.crt -noout -subject -dates
+
+      - name: Verify direct port access
+        run: |
+          echo "Verifying direct port-based access to services..."
+
+          # Test Elasticsearch on port 9200
+          echo "Testing Elasticsearch on port 9200..."
+          ES_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --cacert ./ca.crt https://localhost:9200 2>/dev/null || echo "000")
+          echo "Elasticsearch port 9200 status: $ES_STATUS"
+
+          # Test Kibana on port 5601
+          echo "Testing Kibana on port 5601..."
+          KB_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --cacert ./ca.crt https://localhost:5601 2>/dev/null || echo "000")
+          echo "Kibana port 5601 status: $KB_STATUS"
+
+          # Test Fleet on port 8220
+          echo "Testing Fleet on port 8220..."
+          FLEET_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --cacert ./ca.crt https://localhost:8220/api/status 2>/dev/null || echo "000")
+          echo "Fleet port 8220 status: $FLEET_STATUS"
+
+          echo "Direct port access verification complete"
+
+      - name: Run full test suite
+        id: tests
+        run: |
+          export ELASTICSEARCH_URL="https://localhost:9200"
+          export KIBANA_URL="https://localhost:5601"
+          export FLEET_URL="https://localhost:8220"
+          export ELASTIC_PASSWORD="TestPassword123!"
+          export CA_CERT="./ca.crt"
+          export INGRESS_MODE="direct"
+          export DEBUG="${{ github.event.inputs.debug || 'false' }}"
+
+          # Run full test suite - includes certificates, elasticsearch, kibana, fleet, and agent tests
+          bash .github/scripts/test-stack.sh all
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== Docker Compose Logs ==="
+          docker compose logs --tail=100
+
+          echo ""
+          echo "=== Container Status ==="
+          docker compose ps -a
+
+          echo ""
+          echo "=== Traefik Logs ==="
+          docker compose logs traefik --tail=50
+
+          echo ""
+          echo "=== Elasticsearch Logs ==="
+          docker compose logs es01 --tail=50
+
+          echo ""
+          echo "=== Kibana Logs ==="
+          docker compose logs kibana --tail=50
+
+          echo ""
+          echo "=== Fleet Server Logs ==="
+          docker compose logs fleet-server --tail=50
+
+          echo ""
+          echo "=== Agent Logs ==="
+          docker compose logs agent --tail=50
+
+      - name: Upload logs artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-logs-direct
+          path: |
+            docker-compose-logs.txt
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose down -v --remove-orphans
+          docker system prune -f
