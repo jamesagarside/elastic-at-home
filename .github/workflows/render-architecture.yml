@@ -28,17 +28,21 @@ jobs:
       - name: Create output directory
         run: mkdir -p images/architecture
 
-      - name: Start Structurizr Lite
+      - name: Start Structurizr
         env:
           WORKSPACE_DIR: ${{ github.workspace }}
         run: |
-          docker pull structurizr/lite
+          # structurizr/lite is deprecated — it now just prints a migration
+          # notice and exits. Use the replacement structurizr/structurizr image
+          # with the `local` subcommand.
+          # https://docs.structurizr.com/local
+          docker pull structurizr/structurizr
           docker run \
             -d \
             --name structurizr \
             -p 8080:8080 \
             -v "${WORKSPACE_DIR}":/usr/local/structurizr \
-            structurizr/lite
+            structurizr/structurizr local
 
           # Wait for Structurizr to respond with 200 OK on /workspace/diagrams.
           # Spring Boot startup + DSL parse can exceed 60s on CI runners; allow
