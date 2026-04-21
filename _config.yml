@@ -29,8 +29,9 @@ keywords: >-
   home SIEM, self-hosted SIEM, Elastic Stack Docker Compose,
   Raspberry Pi SIEM, home network monitoring, Elastic Security home lab,
   XDR home network, open-source SIEM, endpoint detection and response,
-  home security operations centre, Elastic Agent Fleet, Elasticsearch
-  Kibana self-hosted, local LLM Elasticsearch, Ollama Gemma Elastic
+  home security operations centre, Elastic Agent Fleet,
+  Elasticsearch Kibana self-hosted, local LLM Elasticsearch,
+  Ollama Gemma Elastic
 
 remote_theme: pages-themes/minimal@v0.2.0
 

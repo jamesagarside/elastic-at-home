@@ -127,8 +127,18 @@ echo "vm.max_map_count=262144" | sudo tee -a /etc/sysctl.conf && sudo sysctl -p
 > [!TIP]
 > Elasticsearch is memory-hungry and blocks during Java GC. Swapping a hot page to disk turns a nanosecond read into a millisecond one. See the [Elastic guide on memory configuration](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/setup-configuration-memory).
 
+**Raspberry Pi OS** (uses `dphys-swapfile`):
+
 ```bash
 sudo dphys-swapfile swapoff && sudo dphys-swapfile uninstall && sudo systemctl disable dphys-swapfile
+```
+
+**Other Debian/Ubuntu hosts** (no `dphys-swapfile`):
+
+```bash
+sudo swapoff -a
+# Comment out (or remove) any swap entries in /etc/fstab so swap stays off across reboots
+sudo sed -i.bak '/\sswap\s/s/^/# /' /etc/fstab
 ```
 
 ### 3. Enable cgroup memory controller (Raspberry Pi only)
@@ -184,8 +194,10 @@ sudo apt update
 sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
 # Allow your user to run Docker without sudo
-sudo groupadd docker
+# (idempotent: only creates the group if it doesn't already exist)
+getent group docker >/dev/null || sudo groupadd docker
 sudo usermod -aG docker $USER
+# Apply the new group in the current shell; alternatively log out and back in
 newgrp docker
 ```
 
@@ -787,10 +799,12 @@ docker compose logs agent
 
 ### Syslog not arriving
 
-1. Is port 514 reachable? `nc -zv <host-ip> 514`
+1. Is port 514 reachable? Test per protocol:
+   - **TCP:** `nc -zv <host-ip> 514`
+   - **UDP:** `nc -u -zv <host-ip> 514` (UDP has no handshake, so a clean exit only confirms the socket is open; confirm receipt by watching agent logs or using your sender's test utility)
 2. Agent logs show the syslog input alive?
-3. Sender pointing at the right IP and port?
-4. TCP: is your source subnet in `ALLOWED_SYSLOG_IPS`?
+3. Sender pointing at the right IP, port, and protocol?
+4. TCP only: is your source subnet in `ALLOWED_SYSLOG_IPS`?
 
 ### Memory / resource issues
 
