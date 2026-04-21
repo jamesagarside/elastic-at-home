@@ -271,23 +271,37 @@ services:
             # actually uses — the inference endpoint alone is not enough.
             # Requires trial or enterprise license to be active.
             # Safe to re-run: skips if connector already exists.
+            #
+            # Kibana does not immediately observe the trial license; the
+            # connectors API can report "not available with the current
+            # configuration" for a short window after activation. Retry for
+            # up to 60s so setup is robust in slow/fresh environments.
             # =============================================================
             echo "Creating Kibana GenAI connector for local LLM...";
-            connector_response=$$(curl -s -X POST --cacert config/certs/ca/ca.crt \
-              -u "elastic:${ELASTIC_PASSWORD}" \
-              -H "Content-Type: application/json" \
-              -H "kbn-xsrf: true" \
-              "https://kibana:5601/api/actions/connector" \
-              -d "{\"connector_type_id\":\".gen-ai\",\"name\":\"Local LLM (Ollama)\",\"config\":{\"apiProvider\":\"Other\",\"apiUrl\":\"http://ollama:11434/v1/chat/completions\",\"defaultModel\":\"$$LLM_EFFECTIVE_MODEL\",\"enableNativeFunctionCalling\":false},\"secrets\":{\"apiKey\":\"${LLM_API_KEY:-not-needed}\"}}" \
-              2>&1);
-            if echo "$$connector_response" | grep -q '"id"'; then
-              connector_id=$$(echo "$$connector_response" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4);
-              echo "Kibana GenAI connector created successfully (id: $$connector_id)";
-            elif echo "$$connector_response" | grep -q "already exists"; then
-              echo "Kibana GenAI connector already exists";
-            else
-              echo "WARNING: Could not create Kibana GenAI connector: $$connector_response";
-            fi;
+            connector_attempt=0;
+            while [ "$$connector_attempt" -lt 12 ]; do
+              connector_attempt=$$((connector_attempt + 1));
+              connector_response=$$(curl -s -X POST --cacert config/certs/ca/ca.crt \
+                -u "elastic:${ELASTIC_PASSWORD}" \
+                -H "Content-Type: application/json" \
+                -H "kbn-xsrf: true" \
+                "https://kibana:5601/api/actions/connector" \
+                -d "{\"connector_type_id\":\".gen-ai\",\"name\":\"Local LLM (Ollama)\",\"config\":{\"apiProvider\":\"Other\",\"apiUrl\":\"http://ollama:11434/v1/chat/completions\",\"defaultModel\":\"$$LLM_EFFECTIVE_MODEL\",\"enableNativeFunctionCalling\":false},\"secrets\":{\"apiKey\":\"${LLM_API_KEY:-not-needed}\"}}" \
+                2>&1);
+              if echo "$$connector_response" | grep -q '"id"'; then
+                connector_id=$$(echo "$$connector_response" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4);
+                echo "Kibana GenAI connector created successfully (id: $$connector_id)";
+                break;
+              elif echo "$$connector_response" | grep -q "already exists"; then
+                echo "Kibana GenAI connector already exists";
+                break;
+              fi;
+              if [ "$$connector_attempt" -eq 12 ]; then
+                echo "WARNING: Could not create Kibana GenAI connector after $$connector_attempt attempts: $$connector_response";
+              else
+                sleep 5;
+              fi;
+            done;
           else
             echo "WARNING: Ollama model did not load within 15 minutes. Skipping inference endpoint.";
           fi;

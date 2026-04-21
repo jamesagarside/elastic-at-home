@@ -28,13 +28,16 @@ on:
   workflow_dispatch:
     inputs:
       stack_version:
-        description: 'Elastic Stack version to test'
+        description: 'Elastic Stack version to test (blank = read from .env.example)'
         required: false
-        default: '9.3.2'
+        default: ''
       llm_model:
         description: 'Ollama model to test with'
         required: false
-        default: 'gemma4:e2b'
+        # Small model (~300 MB RAM) — GitHub runners have ~7 GiB total and only
+        # ~4.5 GiB free once ES/Kibana/Fleet/Agent are up. Larger models like
+        # gemma4:e2b (7.2 GiB) fail the ES inference endpoint validation.
+        default: 'gemma3:270m'
       debug:
         description: 'Enable debug output'
         required: false
@@ -42,8 +45,7 @@ on:
         type: boolean
 
 env:
-  STACK_VERSION: ${{ github.event.inputs.stack_version || '9.3.2' }}
-  LLM_MODEL: ${{ github.event.inputs.llm_model || 'gemma4:e2b' }}
+  LLM_MODEL: ${{ github.event.inputs.llm_model || 'gemma3:270m' }}
   ES_DOMAIN: es.test.local
   KIBANA_DOMAIN: kibana.test.local
   FLEET_DOMAIN: fleet.test.local
@@ -90,6 +92,22 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Resolve stack version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.stack_version }}
+        run: |
+          if [[ -n "$INPUT_VERSION" ]]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION=$(grep -oE '^STACK_VERSION=[0-9]+\.[0-9]+\.[0-9]+' .env.example | cut -d= -f2)
+          fi
+          if [[ -z "$VERSION" ]]; then
+            echo "::error::Failed to resolve STACK_VERSION from input or .env.example"
+            exit 1
+          fi
+          echo "STACK_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Using stack version: $VERSION"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -174,14 +192,23 @@ jobs:
 
       - name: Wait for Setup container to complete
         run: |
-          timeout 300 bash -c '
+          # Setup container doesn't exit — runs tail -f /dev/null after seeding
+          # and uses its healthcheck (es01.crt file) to signal completion.
+          # Wait for healthy, not exit.
+          timeout 600 bash -c '
             while true; do
-              if ! docker compose ps setup --status running 2>/dev/null | grep -q setup; then
-                exit_code=$(docker inspect --format="{{.State.ExitCode}}" elastic-at-home-setup-1 2>/dev/null || echo "unknown")
-                if [[ "$exit_code" == "0" ]]; then echo "Setup complete"; exit 0;
-                elif [[ "$exit_code" == "unknown" ]]; then echo "Waiting for setup...";
-                else echo "Setup failed ($exit_code)"; docker compose logs setup; exit 1; fi
-              fi; sleep 10
+              # Resolve container ID via compose (robust to project renames).
+              cid=$(docker compose ps -q setup 2>/dev/null)
+              if [[ -z "$cid" ]]; then echo "Setup container not found yet"; sleep 10; continue; fi
+              status=$(docker inspect --format="{{.State.Status}}" "$cid" 2>/dev/null || echo "missing")
+              health=$(docker inspect --format="{{.State.Health.Status}}" "$cid" 2>/dev/null || echo "unknown")
+              if [[ "$status" == "exited" ]]; then
+                exit_code=$(docker inspect --format="{{.State.ExitCode}}" "$cid" 2>/dev/null || echo "unknown")
+                if [[ "$exit_code" == "0" ]]; then echo "Setup exited cleanly"; exit 0; fi
+                echo "Setup failed ($exit_code)"; docker compose logs setup; exit 1
+              fi
+              if [[ "$health" == "healthy" ]]; then echo "Setup healthy"; exit 0; fi
+              echo "Setup status=$status health=$health"; sleep 10
             done
           '
 
@@ -251,6 +278,9 @@ jobs:
           export OLLAMA_URL="http://localhost:11434"
           export ENABLE_LLM_INGRESS="$LLM_INGRESS"
           export LLM_INGRESS_URL="$LLM_URL"
+          # LLM_MODEL is set at workflow level via env.LLM_MODEL — export so the
+          # test script can query the matching model instead of a hardcoded name.
+          export LLM_MODEL
           export DEBUG="$DEBUG_FLAG"
 
           bash .github/scripts/test-stack.sh llm

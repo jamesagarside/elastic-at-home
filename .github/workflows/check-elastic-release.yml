@@ -34,8 +34,15 @@ jobs:
       - name: Check latest Elastic Stack version
         id: check-elastic
         run: |
-          # Get the current version from our workflow files
-          CURRENT=$(grep -oP "default: '\K[0-9]+\.[0-9]+\.[0-9]+" .github/workflows/test-direct.yml | head -1)
+          # Read the current version from .env.example (single source of truth).
+          # Workflow files can't be modified by GITHUB_TOKEN (missing `workflows`
+          # permission), so the version lives in .env.example and test workflows
+          # resolve it at runtime.
+          CURRENT=$(grep -oP '^STACK_VERSION=\K[0-9]+\.[0-9]+\.[0-9]+' .env.example)
+          if [[ -z "$CURRENT" ]]; then
+            echo "::error::Could not parse STACK_VERSION from .env.example — aborting to avoid an invalid update PR."
+            exit 1
+          fi
           echo "current_version=$CURRENT" >> $GITHUB_OUTPUT
           echo "Current Elastic version: $CURRENT"
 
@@ -136,24 +143,17 @@ jobs:
         run: |
           echo "Updating Elastic Stack: $OLD_VERSION -> $NEW_VERSION"
 
-          # Update workflow file defaults
-          sed -i "s/default: '${OLD_VERSION}'/default: '${NEW_VERSION}'/g" \
-            .github/workflows/test-direct.yml \
-            .github/workflows/test-selfsigned.yml \
-            .github/workflows/test-letsencrypt.yml
+          # Only update .env.example (single source of truth). Test workflows
+          # resolve STACK_VERSION from this file at runtime, so modifying
+          # workflow files is unnecessary and would require a PAT with
+          # `workflows` scope to push.
+          #
+          # Full-line replacement (^STACK_VERSION=.*) avoids two footguns:
+          #   1) OLD_VERSION dots being treated as regex wildcards
+          #   2) OLD_VERSION matching a prefix of a longer version on the line
+          sed -i "s|^STACK_VERSION=.*|STACK_VERSION=${NEW_VERSION}|" .env.example
 
-          # Update the fallback version in env blocks
-          sed -i "s/|| '${OLD_VERSION}'/|| '${NEW_VERSION}'/g" \
-            .github/workflows/test-direct.yml \
-            .github/workflows/test-selfsigned.yml \
-            .github/workflows/test-letsencrypt.yml
-
-          # Update .env.example if it contains the version
-          if grep -q "STACK_VERSION=${OLD_VERSION}" .env.example 2>/dev/null; then
-            sed -i "s/STACK_VERSION=${OLD_VERSION}/STACK_VERSION=${NEW_VERSION}/" .env.example
-          fi
-
-          echo "Elastic version updated in all files"
+          echo "Elastic version updated in .env.example"
           git diff --stat
 
       - name: Update Traefik version

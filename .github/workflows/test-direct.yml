@@ -26,28 +26,40 @@ on:
   workflow_dispatch:
     inputs:
       stack_version:
-        description: 'Elastic Stack version to test'
+        description: 'Elastic Stack version to test (blank = read from .env.example)'
         required: false
-        default: '9.3.2'
+        default: ''
       debug:
         description: 'Enable debug output'
         required: false
         default: false
         type: boolean
 
-env:
-  # Default stack version (can be overridden by workflow_dispatch)
-  STACK_VERSION: ${{ github.event.inputs.stack_version || '9.3.2' }}
-
 jobs:
   test-direct:
     name: Direct Access Mode (Port-Based)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Resolve stack version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.stack_version }}
+        run: |
+          if [[ -n "$INPUT_VERSION" ]]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION=$(grep -oE '^STACK_VERSION=[0-9]+\.[0-9]+\.[0-9]+' .env.example | cut -d= -f2)
+          fi
+          if [[ -z "$VERSION" ]]; then
+            echo "::error::Failed to resolve STACK_VERSION from input or .env.example"
+            exit 1
+          fi
+          echo "STACK_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Using stack version: $VERSION"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -122,26 +134,42 @@ jobs:
 
       - name: Wait for Setup container to complete
         run: |
-          echo "Waiting for setup container to complete certificate generation..."
-          timeout 300 bash -c '
+          echo "Waiting for setup container to become healthy..."
+          # The setup container doesn't exit — after generating certs and
+          # seeding Kibana/Fleet, it runs `tail -f /dev/null` and relies on
+          # its healthcheck (existence of es01.crt) to signal completion to
+          # downstream services. So wait for healthy, not exit.
+          # 10 min: the full sequence (certs + waiting for ES + Kibana +
+          # seeding Fleet) can exceed 5 min on CI runners.
+          timeout 600 bash -c '
             while true; do
-              # Check if setup container has exited (not running)
-              if ! docker compose ps setup --status running 2>/dev/null | grep -q setup; then
-                # Container is not running, check exit code
-                exit_code=$(docker inspect --format="{{.State.ExitCode}}" elastic-at-home-setup-1 2>/dev/null || echo "unknown")
-                if [[ "$exit_code" == "0" ]]; then
-                  echo "Setup completed successfully"
-                  exit 0
-                elif [[ "$exit_code" == "unknown" ]]; then
-                  echo "Setup container not found yet, waiting..."
-                else
-                  echo "Setup failed with exit code $exit_code"
-                  docker compose logs setup
-                  exit 1
-                fi
-              else
-                echo "Setup container still running..."
+              # Resolve the setup container each iteration — more robust than
+              # hard-coding `elastic-at-home-setup-1`, which breaks if the
+              # Compose project name differs (e.g., renamed checkout dir or
+              # COMPOSE_PROJECT_NAME set).
+              cid=$(docker compose ps -q setup 2>/dev/null)
+              if [[ -z "$cid" ]]; then
+                echo "Setup container not found yet"
+                sleep 10
+                continue
               fi
+              status=$(docker inspect --format="{{.State.Status}}" "$cid" 2>/dev/null || echo "missing")
+              health=$(docker inspect --format="{{.State.Health.Status}}" "$cid" 2>/dev/null || echo "unknown")
+              if [[ "$status" == "exited" ]]; then
+                exit_code=$(docker inspect --format="{{.State.ExitCode}}" "$cid" 2>/dev/null || echo "unknown")
+                if [[ "$exit_code" == "0" ]]; then
+                  echo "Setup exited cleanly"
+                  exit 0
+                fi
+                echo "Setup exited with code $exit_code"
+                docker compose logs setup
+                exit 1
+              fi
+              if [[ "$health" == "healthy" ]]; then
+                echo "Setup healthy — certificates generated"
+                exit 0
+              fi
+              echo "Setup status=$status health=$health"
               sleep 10
             done
           '
@@ -180,7 +208,9 @@ jobs:
       - name: Wait for Fleet Server to be healthy
         run: |
           echo "Waiting for Fleet Server to be healthy..."
-          timeout 300 bash -c '
+          # 10 min: Fleet Server waits for Kibana to finish preconfiguring the
+          # fleet-server-policy, which can be slow on resource-constrained CI.
+          timeout 600 bash -c '
             while true; do
               health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-fleet-server-1 2>/dev/null || echo "unknown")
               echo "Fleet Server health: $health"
