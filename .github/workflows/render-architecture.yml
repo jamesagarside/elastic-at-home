@@ -28,31 +28,24 @@ jobs:
       - name: Create output directory
         run: mkdir -p images/architecture
 
-      - name: Start Structurizr
+      - name: Start Structurizr Lite
         env:
           WORKSPACE_DIR: ${{ github.workspace }}
         run: |
-          # structurizr/lite is deprecated — it now just prints a migration
-          # notice and exits. Use the replacement structurizr/structurizr image
-          # with the `local` subcommand.
-          # https://docs.structurizr.com/local
-          #
-          # Stage workspace in a dedicated dir we can make world-writable.
-          # structurizr/structurizr needs to write (cache, re-render workspace.json)
-          # and runs as a non-root user that won't match the runner's uid.
-          STAGE_DIR=/tmp/structurizr-workspace
-          mkdir -p "$STAGE_DIR"
-          cp "${WORKSPACE_DIR}/workspace.dsl" "$STAGE_DIR/"
-          [ -f "${WORKSPACE_DIR}/workspace.json" ] && cp "${WORKSPACE_DIR}/workspace.json" "$STAGE_DIR/" || true
-          chmod -R 777 "$STAGE_DIR"
-
-          docker pull structurizr/structurizr
+          # Pin to the last structurizr/lite release before Structurizr Lite
+          # was sunset in favour of structurizr/structurizr. The :latest tag
+          # now just prints a migration notice and exits, and the replacement
+          # image's DSL parser rejects the `branding` block used in
+          # workspace.dsl. 2025.11.08 is the last working DSL-compatible tag.
+          # https://hub.docker.com/r/structurizr/lite/tags
+          IMAGE="structurizr/lite:2025.11.08"
+          docker pull "$IMAGE"
           docker run \
             -d \
             --name structurizr \
             -p 8080:8080 \
-            -v "$STAGE_DIR":/usr/local/structurizr \
-            structurizr/structurizr local
+            -v "${WORKSPACE_DIR}":/usr/local/structurizr \
+            "$IMAGE"
 
           # Wait for Structurizr to respond with 200 OK on /workspace/diagrams.
           # Spring Boot startup + DSL parse can exceed 60s on CI runners; allow
