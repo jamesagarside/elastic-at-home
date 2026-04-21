@@ -275,6 +275,9 @@ jobs:
           export OLLAMA_URL="http://localhost:11434"
           export ENABLE_LLM_INGRESS="$LLM_INGRESS"
           export LLM_INGRESS_URL="$LLM_URL"
+          # LLM_MODEL is set at workflow level via env.LLM_MODEL — export so the
+          # test script can query the matching model instead of a hardcoded name.
+          export LLM_MODEL
           export DEBUG="$DEBUG_FLAG"
 
           bash .github/scripts/test-stack.sh llm
