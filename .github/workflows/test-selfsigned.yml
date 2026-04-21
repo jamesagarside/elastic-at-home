@@ -164,10 +164,17 @@ jobs:
           # downstream services. So wait for healthy, not exit.
           timeout 600 bash -c '
             while true; do
-              status=$(docker inspect --format="{{.State.Status}}" elastic-at-home-setup-1 2>/dev/null || echo "missing")
-              health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-setup-1 2>/dev/null || echo "unknown")
+              # Resolve container ID via compose (robust to project renames).
+              cid=$(docker compose ps -q setup 2>/dev/null)
+              if [[ -z "$cid" ]]; then
+                echo "Setup container not found yet"
+                sleep 10
+                continue
+              fi
+              status=$(docker inspect --format="{{.State.Status}}" "$cid" 2>/dev/null || echo "missing")
+              health=$(docker inspect --format="{{.State.Health.Status}}" "$cid" 2>/dev/null || echo "unknown")
               if [[ "$status" == "exited" ]]; then
-                exit_code=$(docker inspect --format="{{.State.ExitCode}}" elastic-at-home-setup-1 2>/dev/null || echo "unknown")
+                exit_code=$(docker inspect --format="{{.State.ExitCode}}" "$cid" 2>/dev/null || echo "unknown")
                 if [[ "$exit_code" == "0" ]]; then
                   echo "Setup exited cleanly"
                   exit 0

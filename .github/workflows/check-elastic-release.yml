@@ -39,6 +39,10 @@ jobs:
           # permission), so the version lives in .env.example and test workflows
           # resolve it at runtime.
           CURRENT=$(grep -oP '^STACK_VERSION=\K[0-9]+\.[0-9]+\.[0-9]+' .env.example)
+          if [[ -z "$CURRENT" ]]; then
+            echo "::error::Could not parse STACK_VERSION from .env.example — aborting to avoid an invalid update PR."
+            exit 1
+          fi
           echo "current_version=$CURRENT" >> $GITHUB_OUTPUT
           echo "Current Elastic version: $CURRENT"
 
@@ -143,7 +147,11 @@ jobs:
           # resolve STACK_VERSION from this file at runtime, so modifying
           # workflow files is unnecessary and would require a PAT with
           # `workflows` scope to push.
-          sed -i "s/^STACK_VERSION=${OLD_VERSION}/STACK_VERSION=${NEW_VERSION}/" .env.example
+          #
+          # Full-line replacement (^STACK_VERSION=.*) avoids two footguns:
+          #   1) OLD_VERSION dots being treated as regex wildcards
+          #   2) OLD_VERSION matching a prefix of a longer version on the line
+          sed -i "s|^STACK_VERSION=.*|STACK_VERSION=${NEW_VERSION}|" .env.example
 
           echo "Elastic version updated in .env.example"
           git diff --stat

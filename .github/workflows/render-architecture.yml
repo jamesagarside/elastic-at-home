@@ -53,18 +53,21 @@ jobs:
           # dead server).
           echo "Waiting for Structurizr Lite to be ready..."
           ready=0
-          for i in $(seq 1 90); do
+          interval=2
+          max_attempts=90
+          for i in $(seq 1 "$max_attempts"); do
+            elapsed=$((i * interval))
             status=$(curl -sS -o /dev/null -w "%{http_code}" \
               http://localhost:8080/workspace/diagrams 2>/dev/null || echo "000")
             if [[ "$status" == "200" ]]; then
-              echo "Structurizr Lite is ready (HTTP $status after ${i}s)"
+              echo "Structurizr Lite is ready (HTTP $status after ${elapsed}s)"
               ready=1
               break
             fi
             if (( i % 10 == 0 )); then
-              echo "Attempt $i/90 (status: $status)"
+              echo "Attempt $i/${max_attempts} (${elapsed}s elapsed, status: $status)"
             fi
-            sleep 2
+            sleep "$interval"
           done
 
           if [[ $ready -ne 1 ]]; then

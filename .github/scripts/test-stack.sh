@@ -581,9 +581,13 @@ test_ollama_health() {
         return 1
     fi
 
-    # In no-ingress CI mode Ollama is unreachable from host by design — skip
-    # rather than fail.
-    if [[ -z "${LLM_INGRESS_URL:-}" || "${ENABLE_LLM_INGRESS:-}" != "true" ]]; then
+    # In CI's no-ingress matrix row Ollama is unreachable from host by design
+    # (no port publishing, no Traefik route) — skip rather than fail. We gate
+    # on CI=true so local runs still surface real breakages when someone
+    # expects Ollama at OLLAMA_URL. Set SKIP_OLLAMA_HOST_CHECK=true to force
+    # the skip in other environments.
+    if [[ "${CI:-}" == "true" || "${SKIP_OLLAMA_HOST_CHECK:-}" == "true" ]] && \
+       [[ -z "${LLM_INGRESS_URL:-}" || "${ENABLE_LLM_INGRESS:-}" != "true" ]]; then
         record_skip "Ollama not reachable at $OLLAMA_URL (no ingress configured; expected in no-ingress CI)"
         return 0
     fi
