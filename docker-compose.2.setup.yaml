@@ -272,7 +272,7 @@ services:
             # Requires trial or enterprise license to be active.
             # Safe to re-run: skips if connector already exists.
             #
-            # Kibana doesn't immediately observe the trial license — the
+            # Kibana does not immediately observe the trial license; the
             # connectors API can report "not available with the current
             # configuration" for a short window after activation. Retry for
             # up to 60s so setup is robust in slow/fresh environments.
