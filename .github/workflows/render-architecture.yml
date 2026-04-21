@@ -36,12 +36,22 @@ jobs:
           # notice and exits. Use the replacement structurizr/structurizr image
           # with the `local` subcommand.
           # https://docs.structurizr.com/local
+          #
+          # Stage workspace in a dedicated dir we can make world-writable.
+          # structurizr/structurizr needs to write (cache, re-render workspace.json)
+          # and runs as a non-root user that won't match the runner's uid.
+          STAGE_DIR=/tmp/structurizr-workspace
+          mkdir -p "$STAGE_DIR"
+          cp "${WORKSPACE_DIR}/workspace.dsl" "$STAGE_DIR/"
+          [ -f "${WORKSPACE_DIR}/workspace.json" ] && cp "${WORKSPACE_DIR}/workspace.json" "$STAGE_DIR/" || true
+          chmod -R 777 "$STAGE_DIR"
+
           docker pull structurizr/structurizr
           docker run \
             -d \
             --name structurizr \
             -p 8080:8080 \
-            -v "${WORKSPACE_DIR}":/usr/local/structurizr \
+            -v "$STAGE_DIR":/usr/local/structurizr \
             structurizr/structurizr local
 
           # Wait for Structurizr to respond with 200 OK on /workspace/diagrams.
