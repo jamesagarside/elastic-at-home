@@ -198,7 +198,9 @@ jobs:
       - name: Wait for Fleet Server to be healthy
         run: |
           echo "Waiting for Fleet Server to be healthy..."
-          timeout 300 bash -c '
+          # 10 min: Fleet Server waits for Kibana to finish preconfiguring the
+          # fleet-server-policy, which can be slow on resource-constrained CI.
+          timeout 600 bash -c '
             while true; do
               health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-fleet-server-1 2>/dev/null || echo "unknown")
               echo "Fleet Server health: $health"
