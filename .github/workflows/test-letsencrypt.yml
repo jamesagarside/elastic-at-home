@@ -5,9 +5,9 @@ on:
   workflow_dispatch:
     inputs:
       stack_version:
-        description: 'Elastic Stack version to test'
+        description: 'Elastic Stack version to test (blank = read from .env.example)'
         required: false
-        default: '9.3.2'
+        default: ''
       test_domain:
         description: 'Base domain for testing (e.g., siem.example.com)'
         required: false
@@ -29,7 +29,6 @@ on:
     - cron: '0 3 * * 0'
 
 env:
-  STACK_VERSION: ${{ github.event.inputs.stack_version || '9.3.2' }}
   # Default domain for scheduled runs - override via workflow_dispatch
   TEST_DOMAIN: ${{ github.event.inputs.test_domain || vars.TEST_DOMAIN }}
 
@@ -83,6 +82,22 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Resolve stack version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.stack_version }}
+        run: |
+          if [[ -n "$INPUT_VERSION" ]]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION=$(grep -oE '^STACK_VERSION=[0-9]+\.[0-9]+\.[0-9]+' .env.example | cut -d= -f2)
+          fi
+          if [[ -z "$VERSION" ]]; then
+            echo "::error::Failed to resolve STACK_VERSION from input or .env.example"
+            exit 1
+          fi
+          echo "STACK_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Using stack version: $VERSION"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

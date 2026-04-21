@@ -26,28 +26,40 @@ on:
   workflow_dispatch:
     inputs:
       stack_version:
-        description: 'Elastic Stack version to test'
+        description: 'Elastic Stack version to test (blank = read from .env.example)'
         required: false
-        default: '9.3.2'
+        default: ''
       debug:
         description: 'Enable debug output'
         required: false
         default: false
         type: boolean
 
-env:
-  # Default stack version (can be overridden by workflow_dispatch)
-  STACK_VERSION: ${{ github.event.inputs.stack_version || '9.3.2' }}
-
 jobs:
   test-direct:
     name: Direct Access Mode (Port-Based)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Resolve stack version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.stack_version }}
+        run: |
+          if [[ -n "$INPUT_VERSION" ]]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION=$(grep -oE '^STACK_VERSION=[0-9]+\.[0-9]+\.[0-9]+' .env.example | cut -d= -f2)
+          fi
+          if [[ -z "$VERSION" ]]; then
+            echo "::error::Failed to resolve STACK_VERSION from input or .env.example"
+            exit 1
+          fi
+          echo "STACK_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Using stack version: $VERSION"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -123,7 +135,9 @@ jobs:
       - name: Wait for Setup container to complete
         run: |
           echo "Waiting for setup container to complete certificate generation..."
-          timeout 300 bash -c '
+          # 10 min: setup waits for Kibana to be healthy before seeding Fleet,
+          # which can exceed 5 min on CI runners under resource contention.
+          timeout 600 bash -c '
             while true; do
               # Check if setup container has exited (not running)
               if ! docker compose ps setup --status running 2>/dev/null | grep -q setup; then

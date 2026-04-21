@@ -29,25 +29,45 @@ jobs:
         run: mkdir -p images/architecture
 
       - name: Start Structurizr Lite
+        env:
+          WORKSPACE_DIR: ${{ github.workspace }}
         run: |
           docker pull structurizr/lite
           docker run \
             -d \
             --name structurizr \
             -p 8080:8080 \
-            -v ${{ github.workspace }}:/usr/local/structurizr \
+            -v "${WORKSPACE_DIR}":/usr/local/structurizr \
             structurizr/lite
 
-          # Wait for Structurizr to start
-          echo "Waiting for Structurizr Lite to start..."
-          for i in {1..30}; do
-            if curl -s http://localhost:8080 > /dev/null 2>&1; then
-              echo "Structurizr Lite is ready!"
+          # Wait for Structurizr to respond with 200 OK on /workspace/diagrams.
+          # Spring Boot startup + DSL parse can exceed 60s on CI runners; allow
+          # up to 3 min and fail-fast (so we don't proceed to puppeteer with a
+          # dead server).
+          echo "Waiting for Structurizr Lite to be ready..."
+          ready=0
+          for i in $(seq 1 90); do
+            status=$(curl -sS -o /dev/null -w "%{http_code}" \
+              http://localhost:8080/workspace/diagrams 2>/dev/null || echo "000")
+            if [[ "$status" == "200" ]]; then
+              echo "Structurizr Lite is ready (HTTP $status after ${i}s)"
+              ready=1
               break
             fi
-            echo "Attempt $i/30..."
+            if (( i % 10 == 0 )); then
+              echo "Attempt $i/90 (status: $status)"
+            fi
             sleep 2
           done
+
+          if [[ $ready -ne 1 ]]; then
+            echo "::error::Structurizr Lite failed to become ready within 180s"
+            echo "=== docker ps ==="
+            docker ps -a
+            echo "=== Structurizr container logs ==="
+            docker logs structurizr 2>&1 | tail -100
+            exit 1
+          fi
 
       - name: Install Inter font
         run: |
