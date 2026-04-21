@@ -192,16 +192,20 @@ jobs:
 
       - name: Wait for Setup container to complete
         run: |
-          # 10 min: setup waits for Kibana + Ollama inference endpoint creation,
-          # which can exceed 5 min on CI runners under resource contention.
+          # Setup container doesn't exit — runs tail -f /dev/null after seeding
+          # and uses its healthcheck (es01.crt file) to signal completion.
+          # Wait for healthy, not exit.
           timeout 600 bash -c '
             while true; do
-              if ! docker compose ps setup --status running 2>/dev/null | grep -q setup; then
+              status=$(docker inspect --format="{{.State.Status}}" elastic-at-home-setup-1 2>/dev/null || echo "missing")
+              health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-setup-1 2>/dev/null || echo "unknown")
+              if [[ "$status" == "exited" ]]; then
                 exit_code=$(docker inspect --format="{{.State.ExitCode}}" elastic-at-home-setup-1 2>/dev/null || echo "unknown")
-                if [[ "$exit_code" == "0" ]]; then echo "Setup complete"; exit 0;
-                elif [[ "$exit_code" == "unknown" ]]; then echo "Waiting for setup...";
-                else echo "Setup failed ($exit_code)"; docker compose logs setup; exit 1; fi
-              fi; sleep 10
+                if [[ "$exit_code" == "0" ]]; then echo "Setup exited cleanly"; exit 0; fi
+                echo "Setup failed ($exit_code)"; docker compose logs setup; exit 1
+              fi
+              if [[ "$health" == "healthy" ]]; then echo "Setup healthy"; exit 0; fi
+              echo "Setup status=$status health=$health"; sleep 10
             done
           '
 

@@ -196,27 +196,20 @@ jobs:
 
       - name: Wait for Setup container to complete
         run: |
-          echo "Waiting for setup container to complete..."
-          timeout 300 bash -c '
+          echo "Waiting for setup container to become healthy..."
+          # Setup container runs tail -f /dev/null after seeding and uses its
+          # healthcheck to signal completion. Wait for healthy, not exit.
+          timeout 600 bash -c '
             while true; do
-              # Check if setup container has exited (not running)
-              if ! docker compose ps setup --status running 2>/dev/null | grep -q setup; then
-                # Container is not running, check exit code
+              status=$(docker inspect --format="{{.State.Status}}" elastic-at-home-setup-1 2>/dev/null || echo "missing")
+              health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-setup-1 2>/dev/null || echo "unknown")
+              if [[ "$status" == "exited" ]]; then
                 exit_code=$(docker inspect --format="{{.State.ExitCode}}" elastic-at-home-setup-1 2>/dev/null || echo "unknown")
-                if [[ "$exit_code" == "0" ]]; then
-                  echo "Setup completed successfully"
-                  exit 0
-                elif [[ "$exit_code" == "unknown" ]]; then
-                  echo "Setup container not found yet, waiting..."
-                else
-                  echo "Setup failed with exit code $exit_code"
-                  docker compose logs setup
-                  exit 1
-                fi
-              else
-                echo "Setup container still running..."
+                if [[ "$exit_code" == "0" ]]; then echo "Setup exited cleanly"; exit 0; fi
+                echo "Setup failed ($exit_code)"; docker compose logs setup; exit 1
               fi
-              sleep 10
+              if [[ "$health" == "healthy" ]]; then echo "Setup healthy"; exit 0; fi
+              echo "Setup status=$status health=$health"; sleep 10
             done
           '
 

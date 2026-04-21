@@ -134,28 +134,32 @@ jobs:
 
       - name: Wait for Setup container to complete
         run: |
-          echo "Waiting for setup container to complete certificate generation..."
-          # 10 min: setup waits for Kibana to be healthy before seeding Fleet,
-          # which can exceed 5 min on CI runners under resource contention.
+          echo "Waiting for setup container to become healthy..."
+          # The setup container doesn't exit — after generating certs and
+          # seeding Kibana/Fleet, it runs `tail -f /dev/null` and relies on
+          # its healthcheck (existence of es01.crt) to signal completion to
+          # downstream services. So wait for healthy, not exit.
+          # 10 min: the full sequence (certs + waiting for ES + Kibana +
+          # seeding Fleet) can exceed 5 min on CI runners.
           timeout 600 bash -c '
             while true; do
-              # Check if setup container has exited (not running)
-              if ! docker compose ps setup --status running 2>/dev/null | grep -q setup; then
-                # Container is not running, check exit code
+              status=$(docker inspect --format="{{.State.Status}}" elastic-at-home-setup-1 2>/dev/null || echo "missing")
+              health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-setup-1 2>/dev/null || echo "unknown")
+              if [[ "$status" == "exited" ]]; then
                 exit_code=$(docker inspect --format="{{.State.ExitCode}}" elastic-at-home-setup-1 2>/dev/null || echo "unknown")
                 if [[ "$exit_code" == "0" ]]; then
-                  echo "Setup completed successfully"
+                  echo "Setup exited cleanly"
                   exit 0
-                elif [[ "$exit_code" == "unknown" ]]; then
-                  echo "Setup container not found yet, waiting..."
-                else
-                  echo "Setup failed with exit code $exit_code"
-                  docker compose logs setup
-                  exit 1
                 fi
-              else
-                echo "Setup container still running..."
+                echo "Setup exited with code $exit_code"
+                docker compose logs setup
+                exit 1
               fi
+              if [[ "$health" == "healthy" ]]; then
+                echo "Setup healthy — certificates generated"
+                exit 0
+              fi
+              echo "Setup status=$status health=$health"
               sleep 10
             done
           '
