@@ -14,8 +14,6 @@ openspec/
 
 # Generated/local
 .beads/
-.structurizr
-workspace.json
 
 # GitHub AI prompts/skills (local development only)
 .github/prompts/
