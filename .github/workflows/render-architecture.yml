@@ -46,8 +46,24 @@ jobs:
           name: architecture-diagram
           path: images/architecture/architecture.*
 
-      - name: Open PR with updated diagrams
+      - name: Check for meaningful changes
+        id: diff
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          # Only compare the SVG — PNG bytes can drift between runner images
+          # (libpng/librsvg updates) even when the diagram is visually identical,
+          # which would otherwise trigger an unwanted follow-up PR on every run.
+          if git diff --quiet -- images/architecture/architecture.svg; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "SVG unchanged — skipping PR creation"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "SVG changed — will open follow-up PR"
+            git diff --stat -- images/architecture/
+          fi
+
+      - name: Open PR with updated diagrams
+        if: steps.diff.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v7
         with:
           commit-message: "docs: update architecture diagram"
