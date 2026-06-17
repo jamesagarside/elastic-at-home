@@ -250,8 +250,11 @@ jobs:
             printf '%s' "$MAJOR_NOTE"
             printf '\nCI runs on this PR. Once all checks pass, an automated Go/No-Go review approves and the change auto-merges; an Elastic version change then cuts a `v%s` release. A CI failure opens a tracking issue and dispatches the Copilot coding agent.\n' "$ELASTIC_NEW"
             printf '\n<!-- version-update-meta\n%s\n-->\n' "$META"
-          } > pr_body.md
+          } > "$RUNNER_TEMP/pr_body.md"
 
+          # IMPORTANT: the body file lives in RUNNER_TEMP, never the repo — otherwise
+          # `git add -A` would commit it and the Go/No-Go gate (correctly) rejects the
+          # diff as containing an unexpected file.
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$PR_BRANCH"
@@ -264,8 +267,8 @@ jobs:
 
           EXISTING=$(gh pr list --head "$PR_BRANCH" --state open --json number --jq '.[0].number' 2>/dev/null || echo "")
           if [[ -n "$EXISTING" ]]; then
-            gh pr edit "$EXISTING" --title "$TITLE" --body-file pr_body.md
+            gh pr edit "$EXISTING" --title "$TITLE" --body-file "$RUNNER_TEMP/pr_body.md"
             echo "Updated existing PR #${EXISTING}"
           else
-            gh pr create --title "$TITLE" --body-file pr_body.md --label version-update --head "$PR_BRANCH" --base main
+            gh pr create --title "$TITLE" --body-file "$RUNNER_TEMP/pr_body.md" --label version-update --head "$PR_BRANCH" --base main
           fi
