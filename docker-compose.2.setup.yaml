@@ -165,12 +165,20 @@ services:
 
         # =====================================================================
         # STEP 4: WAIT FOR ELASTICSEARCH
-        # Poll Elasticsearch until it responds. We check for "missing
-        # authentication credentials" message which indicates ES is up and
-        # security is enabled (it rejects our unauthenticated request).
+        # Poll Elasticsearch in two stages:
+        #   a) Wait for ES to accept connections (unauthenticated 401 response
+        #      indicates ES is up and security is enabled).
+        #   b) Wait for the native security realm to finish initialising so
+        #      that the built-in elastic user can actually authenticate.
+        #      In ES 9.x this second step can take significantly longer than
+        #      the first under memory pressure (e.g. when Ollama is running),
+        #      and skipping it causes the kibana_system password step below
+        #      to loop indefinitely with "failed to retrieve password hash".
         # =====================================================================
         echo "Waiting for Elasticsearch availability";
-        until curl -s --cacert config/certs/ca/ca.crt https://es01:9200 | grep -q "missing authentication credentials"; do sleep 30; done;
+        until curl -s --cacert config/certs/ca/ca.crt https://es01:9200 | grep -q "missing authentication credentials"; do sleep 10; done;
+        echo "Waiting for Elasticsearch security initialisation";
+        until curl -s --cacert config/certs/ca/ca.crt -u "elastic:${ELASTIC_PASSWORD}" https://es01:9200 | grep -q '"cluster_name"'; do sleep 10; done;
 
         # =====================================================================
         # STEP 5: SET KIBANA_SYSTEM PASSWORD
