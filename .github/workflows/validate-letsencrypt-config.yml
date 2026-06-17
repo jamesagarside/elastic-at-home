@@ -1,0 +1,95 @@
+name: Validate Let's Encrypt Config
+
+# Lightweight PR gate for the Let's Encrypt ingress mode. The full test-letsencrypt
+# workflow issues REAL certificates and is therefore schedule/dispatch-only (LE rate
+# limits). This check validates configuration only — Compose parsing, correct Traefik
+# config selection, ACME resolver presence — so it can safely run on every PR with no
+# external calls. It is one of the checks the version-update gate waits on before merge.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docker-compose*.yaml'
+      - 'docker-compose*.yml'
+      - 'configurations/traefik/traefik-letsencrypt*'
+      - 'configurations/elastic/fleet-configuration.yaml'
+      - '.env.example'
+      - '.github/workflows/validate-letsencrypt-config.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docker-compose*.yaml'
+      - 'docker-compose*.yml'
+      - 'configurations/traefik/traefik-letsencrypt*'
+      - 'configurations/elastic/fleet-configuration.yaml'
+      - '.env.example'
+      - '.github/workflows/validate-letsencrypt-config.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate Let's Encrypt configuration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve Stack version
+        id: ver
+        run: |
+          set -euo pipefail
+          STACK_VERSION=$(grep -oP '^STACK_VERSION=\K[0-9]+\.[0-9]+\.[0-9]+' .env.example)
+          echo "stack_version=${STACK_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Validating against Stack version ${STACK_VERSION}"
+
+      - name: Write letsencrypt .env
+        env:
+          STACK_VERSION: ${{ steps.ver.outputs.stack_version }}
+        run: |
+          set -euo pipefail
+          cat > .env << EOF
+          INGRESS_MODE=letsencrypt
+          ACME_EMAIL=test@example.com
+          CF_DNS_API_TOKEN=placeholder
+          ELASTIC_PASSWORD=TestPassword123!
+          KIBANA_PASSWORD=TestPassword123!
+          APM_SECRET_TOKEN=TestAPMToken123!
+          STACK_VERSION=${STACK_VERSION}
+          CLUSTER_NAME=test-cluster
+          LICENSE=basic
+          ES_DOMAIN_NAME=es.example.com
+          KIBANA_DOMAIN_NAME=kibana.example.com
+          FLEET_DOMAIN_NAME=fleet.example.com
+          APM_DOMAIN_NAME=apm.example.com
+          AGENT_DOMAIN_NAME=agent.example.com
+          TRAEFIK_DOMAIN_NAME=proxy.example.com
+          ALLOWED_SYSLOG_IPS=0.0.0.0/0
+          KB_MEM_LIMIT=1073741824
+          ES_MEM_LIMIT=2147483648
+          FLEET_MEM_LIMIT=1073741824
+          AGENT_MEM_LIMIT=1073741824
+          KB_SECURITY_ENCRYPTIONKEY=fRDzAmciu0Sv3c0S8lKxJMrxJbEoEKG1
+          KB_REPORTING_ENCRYPTIONKEY=Ih2qXq9iuXdiXg1jo4yXZV8gJWc6stzH
+          KB_OBJECTS_ENCRYPTIONKEY=ny6tYXoI3lYrRcpgMSMQAkrSBen8dE9K
+          EOF
+
+      - name: Validate Compose + ACME configuration
+        run: |
+          set -euo pipefail
+          # Compose parses for letsencrypt mode.
+          docker compose config > /dev/null
+          echo "✓ Docker Compose configuration valid for letsencrypt mode"
+
+          # The letsencrypt Traefik config is the one selected.
+          docker compose config | grep -q "traefik-letsencrypt.yml"
+          echo "✓ Correct Traefik config file selected"
+
+          # ACME certificate resolver is configured.
+          grep -q "certificatesResolvers" configurations/traefik/traefik-letsencrypt.yml
+          echo "✓ ACME certificate resolver configured"
+
+          echo "Let's Encrypt configuration validation passed"

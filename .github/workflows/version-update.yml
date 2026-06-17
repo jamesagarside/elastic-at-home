@@ -1,0 +1,271 @@
+name: Version Update
+
+# Detects new upstream releases of the tracked components — the Elastic Stack version
+# (drives the Elasticsearch / Kibana / Elastic Agent images via STACK_VERSION) and
+# Traefik — and opens a PR with the bump. CI then runs on the PR and version-update-gate.yml
+# takes over (Go/No-Go review -> approve -> auto-merge -> release, or escalate on failure).
+#
+# The PR is opened with a GitHub App token (NOT GITHUB_TOKEN) on purpose: a PR created
+# with GITHUB_TOKEN does not trigger other workflows, so the required CI checks would
+# never run. See docs/adr/0001-automated-version-update-release-pipeline.md.
+# Requires secrets: APP_ID, APP_PRIVATE_KEY (a GitHub App installed on this repo with
+# Contents:RW, Pull requests:RW, Issues:RW).
+
+on:
+  schedule:
+    # A few times a day — every 8 hours (00:00, 08:00, 16:00 UTC).
+    - cron: '0 */8 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (detect only, skip branch push + PR creation)'
+        required: false
+        default: false
+        type: boolean
+
+# PR creation/push uses the App token, so GITHUB_TOKEN only needs read here.
+permissions:
+  contents: read
+
+# Never run two detection passes at once (the 8-hourly schedule could otherwise race).
+concurrency:
+  group: version-update
+  cancel-in-progress: false
+
+env:
+  PR_BRANCH: chore/version-update
+  FAILURE_LABEL: version-update-failure
+
+jobs:
+  detect-and-open-pr:
+    name: Detect releases and open PR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Use the App token so the branch push (and resulting PR) trigger the CI workflows.
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Detect latest Elastic Stack version
+        id: elastic
+        run: |
+          set -euo pipefail
+          # Current version — .env.example STACK_VERSION is the single source of truth.
+          CURRENT=$(grep -oP '^STACK_VERSION=\K[0-9]+\.[0-9]+\.[0-9]+' .env.example || true)
+          if [[ -z "$CURRENT" ]]; then
+            echo "::error::Could not parse STACK_VERSION from .env.example — aborting."
+            exit 1
+          fi
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+
+          # Latest stable elasticsearch tag from Docker Hub (X.Y.Z only — no -SNAPSHOT/-rc/-beta).
+          LATEST=$(curl -fsS "https://registry.hub.docker.com/v2/namespaces/elastic/repositories/elasticsearch/tags?page_size=100&ordering=last_updated" \
+            | jq -r '.results[].name' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V | tail -1 || true)
+
+          # Fallback: Elastic artifacts API.
+          if [[ -z "$LATEST" || "$LATEST" == "null" ]]; then
+            LATEST=$(curl -fsS "https://artifacts-api.elastic.co/v1/versions" \
+              | jq -r '.versions[]' \
+              | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V | tail -1 || true)
+          fi
+
+          if [[ -z "$LATEST" || "$LATEST" == "null" ]]; then
+            echo "::warning::Could not determine latest Elastic version; treating as no-change."
+            LATEST="$CURRENT"
+          fi
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "Elastic: current=$CURRENT latest=$LATEST"
+
+          # Newer only if latest sorts strictly above current.
+          if [[ "$LATEST" != "$CURRENT" && "$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | tail -1)" == "$LATEST" ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            # Major bump? compare the leading major component.
+            if [[ "${LATEST%%.*}" -gt "${CURRENT%%.*}" ]]; then
+              echo "is_major=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "is_major=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "is_major=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Detect latest Traefik version
+        id: traefik
+        run: |
+          set -euo pipefail
+          CURRENT=$(grep -oP 'traefik:v\K[0-9]+\.[0-9]+\.[0-9]+' docker-compose.1.traefik.yaml || true)
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+
+          # Latest v3.x line from Docker Hub.
+          LATEST=$(curl -fsS "https://registry.hub.docker.com/v2/namespaces/library/repositories/traefik/tags?page_size=100&ordering=last_updated" \
+            | jq -r '.results[].name' \
+            | grep -E '^v3\.[0-9]+\.[0-9]+$' \
+            | sed 's/^v//' \
+            | sort -V | tail -1 || true)
+
+          if [[ -z "$LATEST" || "$LATEST" == "null" || -z "$CURRENT" ]]; then
+            echo "::warning::Could not determine Traefik versions; treating as no-change."
+            LATEST="${CURRENT:-}"
+          fi
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "Traefik: current=$CURRENT latest=$LATEST"
+
+          if [[ -n "$CURRENT" && "$LATEST" != "$CURRENT" && "$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | tail -1)" == "$LATEST" ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Summarise
+        id: summary
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.elastic.outputs.changed }}" == "true" || "${{ steps.traefik.outputs.changed }}" == "true" ]]; then
+            echo "has_updates=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_updates=false" >> "$GITHUB_OUTPUT"
+            echo "No updates available — nothing to do."
+          fi
+
+      - name: Check for in-flight PR / open failure issue (idempotency)
+        id: guard
+        if: steps.summary.outputs.has_updates == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ELASTIC_NEW: ${{ steps.elastic.outputs.latest }}
+          TRAEFIK_NEW: ${{ steps.traefik.outputs.latest }}
+        run: |
+          set -euo pipefail
+          SKIP=false
+
+          # Already an open failure issue for this exact Elastic target? Don't re-open a PR
+          # for a version we already know is broken — the escalation owns it.
+          if [[ "${{ steps.elastic.outputs.changed }}" == "true" ]]; then
+            OPEN_ISSUE=$(gh issue list --state open --label "$FAILURE_LABEL" \
+              --search "$ELASTIC_NEW in:title" --json number --jq '.[0].number' 2>/dev/null || echo "")
+            if [[ -n "$OPEN_ISSUE" ]]; then
+              echo "::notice::Open failure issue #${OPEN_ISSUE} already tracks Elastic ${ELASTIC_NEW}; skipping."
+              SKIP=true
+            fi
+          fi
+
+          # Already an open version-update PR for the SAME targets? No-op (don't clobber a
+          # review in progress). A PR for OLDER targets is force-updated below.
+          EXISTING_PR=$(gh pr list --head "$PR_BRANCH" --state open --json number,body --jq '.[0]' 2>/dev/null || echo "")
+          if [[ -n "$EXISTING_PR" && "$EXISTING_PR" != "null" ]]; then
+            BODY=$(echo "$EXISTING_PR" | jq -r '.body // ""')
+            if echo "$BODY" | grep -q "\"elastic_new\":\"${ELASTIC_NEW}\"" && \
+               echo "$BODY" | grep -q "\"traefik_new\":\"${TRAEFIK_NEW}\""; then
+              echo "::notice::Open PR already targets the same versions; skipping."
+              SKIP=true
+            fi
+          fi
+
+          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
+
+      - name: Apply version bumps
+        id: bump
+        if: steps.summary.outputs.has_updates == 'true' && steps.guard.outputs.skip == 'false'
+        env:
+          ELASTIC_OLD: ${{ steps.elastic.outputs.current }}
+          ELASTIC_NEW: ${{ steps.elastic.outputs.latest }}
+          ELASTIC_CHANGED: ${{ steps.elastic.outputs.changed }}
+          TRAEFIK_OLD: ${{ steps.traefik.outputs.current }}
+          TRAEFIK_NEW: ${{ steps.traefik.outputs.latest }}
+          TRAEFIK_CHANGED: ${{ steps.traefik.outputs.changed }}
+        run: |
+          set -euo pipefail
+          if [[ "$ELASTIC_CHANGED" == "true" ]]; then
+            # Full-line replace avoids regex-dot and prefix-match footguns.
+            sed -i "s|^STACK_VERSION=.*|STACK_VERSION=${ELASTIC_NEW}|" .env.example
+            # README badge (line shape: ...Elastic-9.3.2-005571...).
+            sed -i -E "s|Elastic-${ELASTIC_OLD}-|Elastic-${ELASTIC_NEW}-|g" README.md
+            echo "Elastic ${ELASTIC_OLD} -> ${ELASTIC_NEW}"
+          fi
+          if [[ "$TRAEFIK_CHANGED" == "true" ]]; then
+            sed -i "s/traefik:v${TRAEFIK_OLD}/traefik:v${TRAEFIK_NEW}/" docker-compose.1.traefik.yaml
+            echo "Traefik ${TRAEFIK_OLD} -> ${TRAEFIK_NEW}"
+          fi
+          git diff --stat
+
+      - name: Open / update pull request
+        if: >-
+          steps.summary.outputs.has_updates == 'true' &&
+          steps.guard.outputs.skip == 'false' &&
+          github.event.inputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ELASTIC_OLD: ${{ steps.elastic.outputs.current }}
+          ELASTIC_NEW: ${{ steps.elastic.outputs.latest }}
+          ELASTIC_CHANGED: ${{ steps.elastic.outputs.changed }}
+          IS_MAJOR: ${{ steps.elastic.outputs.is_major }}
+          TRAEFIK_OLD: ${{ steps.traefik.outputs.current }}
+          TRAEFIK_NEW: ${{ steps.traefik.outputs.latest }}
+          TRAEFIK_CHANGED: ${{ steps.traefik.outputs.changed }}
+        run: |
+          set -euo pipefail
+
+          TITLE_PARTS=()
+          DELTA_LINES=()
+          if [[ "$ELASTIC_CHANGED" == "true" ]]; then
+            TITLE_PARTS+=("Elastic Stack ${ELASTIC_NEW}")
+            DELTA_LINES+=("- Elastic Stack: \`${ELASTIC_OLD}\` → \`${ELASTIC_NEW}\`")
+          fi
+          if [[ "$TRAEFIK_CHANGED" == "true" ]]; then
+            TITLE_PARTS+=("Traefik ${TRAEFIK_NEW}")
+            DELTA_LINES+=("- Traefik: \`${TRAEFIK_OLD}\` → \`${TRAEFIK_NEW}\`")
+          fi
+          TITLE="chore: update $(IFS=', '; echo "${TITLE_PARTS[*]}")"
+
+          # Machine-readable metadata the gate workflow reads back from the PR body.
+          META=$(jq -nc \
+            --arg eo "$ELASTIC_OLD" --arg en "$ELASTIC_NEW" --arg ec "$ELASTIC_CHANGED" \
+            --arg to "$TRAEFIK_OLD" --arg tn "$TRAEFIK_NEW" --arg tc "$TRAEFIK_CHANGED" \
+            --arg maj "$IS_MAJOR" \
+            '{elastic_old:$eo,elastic_new:$en,elastic_changed:($ec=="true"),
+              traefik_old:$to,traefik_new:$tn,traefik_changed:($tc=="true"),
+              is_major:($maj=="true")}')
+
+          MAJOR_NOTE=""
+          if [[ "$IS_MAJOR" == "true" ]]; then
+            MAJOR_NOTE=$'\n> ⚠️ **Major version bump.** This ships automatically if CI passes, but a heads-up issue will be opened so it is never merged silently.\n'
+          fi
+
+          {
+            printf '## Automated version update\n\n'
+            printf '%s\n' "${DELTA_LINES[@]}"
+            printf '%s' "$MAJOR_NOTE"
+            printf '\nCI runs on this PR. Once all checks pass, an automated Go/No-Go review approves and the change auto-merges; an Elastic version change then cuts a `v%s` release. A CI failure opens a tracking issue and dispatches the Copilot coding agent.\n' "$ELASTIC_NEW"
+            printf '\n<!-- version-update-meta\n%s\n-->\n' "$META"
+          } > pr_body.md
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$PR_BRANCH"
+          git add -A
+          git commit -m "$TITLE"
+          git push -u origin "$PR_BRANCH" --force
+
+          # Ensure the tracking label exists, then create or update the PR.
+          gh label create version-update --color 1d76db --description "Automated dependency version update" --force >/dev/null 2>&1 || true
+
+          EXISTING=$(gh pr list --head "$PR_BRANCH" --state open --json number --jq '.[0].number' 2>/dev/null || echo "")
+          if [[ -n "$EXISTING" ]]; then
+            gh pr edit "$EXISTING" --title "$TITLE" --body-file pr_body.md
+            echo "Updated existing PR #${EXISTING}"
+          else
+            gh pr create --title "$TITLE" --body-file pr_body.md --label version-update --head "$PR_BRANCH" --base main
+          fi
