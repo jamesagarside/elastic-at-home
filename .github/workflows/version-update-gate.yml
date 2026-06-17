@@ -1,0 +1,398 @@
+name: Version Update Gate
+
+# Runs after CI completes on the automated version-update PR and decides what happens:
+#   - all CI green + Go/No-Go = GO  -> approve, merge, and (on an Elastic change) release
+#   - Go/No-Go = NO_GO              -> block merge, ping the maintainer (human look needed)
+#   - any CI check failed          -> open a tracking issue, tag the maintainer, and
+#                                      launch the Copilot coding agent to investigate
+#   - a major Elastic bump         -> always opens a heads-up issue, even on success
+#
+# Triggered by workflow_run (so it runs in the trusted default-branch context with a
+# writable token, not the restricted PR token). Re-entrant: each CI workflow completion
+# fires it; it exits quietly until ALL expected checks have concluded.
+# See docs/adr/0001-automated-version-update-release-pipeline.md.
+
+on:
+  workflow_run:
+    workflows:
+      - "Test Direct Access Deployment"
+      - "Test Self-Signed Deployment"
+      - "Test LLM Integration"
+      - "Validate Let's Encrypt Config"
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'PR number to evaluate (manual re-run)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write       # cut release / tag
+  pull-requests: write  # approve, merge, comment
+  issues: write         # escalation + major heads-up issues
+  models: read          # GitHub Models (openai/gpt-5) for the Go/No-Go verdict
+  actions: read         # read CI run conclusions
+
+concurrency:
+  group: version-update-gate
+  cancel-in-progress: false
+
+env:
+  PR_BRANCH: chore/version-update
+  FAILURE_LABEL: version-update-failure
+  GATE_MODEL: openai/gpt-5
+  MAINTAINER: jamesagarside
+  REPO: ${{ github.repository }}
+
+jobs:
+  gate:
+    name: Evaluate and act
+    runs-on: ubuntu-latest
+    steps:
+      # ----- Locate the version-update PR this event relates to ---------------------
+      - name: Locate PR
+        id: locate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_PR: ${{ github.event.inputs.pr }}
+        run: |
+          set -euo pipefail
+          PROCEED=false; PR=""; SHA=""
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ -n "${DISPATCH_PR:-}" ]]; then
+              # Validate before use — never trust a dispatch input shape.
+              if [[ ! "$DISPATCH_PR" =~ ^[0-9]+$ ]]; then
+                echo "::error::pr input must be a number"; exit 1
+              fi
+              PR="$DISPATCH_PR"
+              SHA=$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq '.headRefOid')
+              PROCEED=true
+            fi
+          else
+            # Only react to CI runs on our automated branch.
+            if [[ "$EVENT_BRANCH" == "$PR_BRANCH" ]]; then
+              PR_JSON=$(gh pr list --repo "$REPO" --head "$PR_BRANCH" --state open \
+                --json number,headRefOid --jq '.[0]' 2>/dev/null || echo "")
+              if [[ -n "$PR_JSON" && "$PR_JSON" != "null" ]]; then
+                PR=$(echo "$PR_JSON" | jq -r '.number')
+                SHA=$(echo "$PR_JSON" | jq -r '.headRefOid')
+                # Ignore stale runs whose SHA is no longer the PR head.
+                if [[ "$SHA" == "$EVENT_SHA" ]]; then PROCEED=true; fi
+              fi
+            fi
+          fi
+
+          echo "proceed=$PROCEED" >> "$GITHUB_OUTPUT"
+          echo "pr=$PR" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Proceed=$PROCEED PR=$PR SHA=$SHA"
+
+      - name: Checkout (default branch, trusted)
+        if: steps.locate.outputs.proceed == 'true'
+        uses: actions/checkout@v4
+
+      # ----- Aggregate the expected CI conclusions for this PR head -----------------
+      - name: Evaluate CI status
+        id: ci
+        if: steps.locate.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ steps.locate.outputs.sha }}
+        run: |
+          set -euo pipefail
+          EXPECTED=( "Test Direct Access Deployment" \
+                     "Test Self-Signed Deployment" \
+                     "Test LLM Integration" \
+                     "Validate Let's Encrypt Config" )
+
+          RUNS=$(gh api "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" \
+            --jq '[.workflow_runs[] | {name, status, conclusion, html_url, created_at}]')
+
+          STATE="green"; FAILED_URLS=""
+          for wf in "${EXPECTED[@]}"; do
+            LATEST=$(echo "$RUNS" | jq -c --arg n "$wf" \
+              '[.[] | select(.name==$n)] | sort_by(.created_at) | last')
+            if [[ "$LATEST" == "null" || -z "$LATEST" ]]; then
+              echo "Pending: $wf has not run yet for this SHA"
+              STATE="pending"; break
+            fi
+            STATUS=$(echo "$LATEST" | jq -r '.status')
+            CONCL=$(echo "$LATEST" | jq -r '.conclusion')
+            if [[ "$STATUS" != "completed" ]]; then
+              echo "Pending: $wf is $STATUS"
+              STATE="pending"; break
+            fi
+            if [[ "$CONCL" != "success" ]]; then
+              echo "Failed: $wf -> $CONCL"
+              URL=$(echo "$LATEST" | jq -r '.html_url')
+              FAILED_URLS="${FAILED_URLS}- ${wf}: ${CONCL} (${URL})"$'\n'
+              STATE="failed"
+            fi
+          done
+
+          echo "state=$STATE" >> "$GITHUB_OUTPUT"
+          {
+            echo "failed_urls<<__EOF__"
+            printf '%s' "$FAILED_URLS"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+          echo "CI state: $STATE"
+
+      # ----- Parse the machine-readable metadata from the PR body -------------------
+      - name: Parse PR metadata
+        id: meta
+        if: steps.locate.outputs.proceed == 'true' && steps.ci.outputs.state != 'pending'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.locate.outputs.pr }}
+        run: |
+          set -euo pipefail
+          gh pr view "$PR" --repo "$REPO" --json body --jq '.body' > pr_body.txt
+          # Extract the JSON between the version-update-meta markers.
+          META=$(awk '/<!-- version-update-meta/{f=1;next} /-->/{f=0} f' pr_body.txt | tr -d '\r')
+          if [[ -z "$META" ]] || ! echo "$META" | jq empty 2>/dev/null; then
+            echo "::error::Could not parse version-update metadata from PR body."
+            exit 1
+          fi
+          {
+            echo "elastic_old=$(echo "$META" | jq -r '.elastic_old')"
+            echo "elastic_new=$(echo "$META" | jq -r '.elastic_new')"
+            echo "elastic_changed=$(echo "$META" | jq -r '.elastic_changed')"
+            echo "traefik_old=$(echo "$META" | jq -r '.traefik_old')"
+            echo "traefik_new=$(echo "$META" | jq -r '.traefik_new')"
+            echo "traefik_changed=$(echo "$META" | jq -r '.traefik_changed')"
+            echo "is_major=$(echo "$META" | jq -r '.is_major')"
+          } >> "$GITHUB_OUTPUT"
+
+      # ===== GREEN PATH: Go/No-Go review ===========================================
+      - name: Go/No-Go review (GitHub Models)
+        id: review
+        if: steps.locate.outputs.proceed == 'true' && steps.ci.outputs.state == 'green'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.locate.outputs.pr }}
+          EO: ${{ steps.meta.outputs.elastic_old }}
+          EN: ${{ steps.meta.outputs.elastic_new }}
+          EC: ${{ steps.meta.outputs.elastic_changed }}
+          TO: ${{ steps.meta.outputs.traefik_old }}
+          TN: ${{ steps.meta.outputs.traefik_new }}
+          TC: ${{ steps.meta.outputs.traefik_changed }}
+        run: |
+          set -euo pipefail
+          gh pr diff "$PR" --repo "$REPO" > diff.txt || true
+
+          SYSTEM='You are a release gatekeeper for a Docker Compose repository. You receive a git diff for an AUTOMATED dependency version bump plus the expected version changes. Return GO only if the diff contains NOTHING beyond the expected version-string updates. Reply with strict JSON only: {"verdict":"GO"|"NO_GO","reason":"<=200 chars"}.'
+          USER=$(printf 'Expected: Elastic %s -> %s (changed=%s), Traefik %s -> %s (changed=%s).\nFiles that may legitimately change: .env.example (STACK_VERSION line), README.md (Elastic badge), docker-compose.1.traefik.yaml (traefik image tag). Any other file, any extra change, or a version that does not match the expected values is NO_GO.\n\n--- DIFF ---\n%s\n' \
+            "$EO" "$EN" "$EC" "$TO" "$TN" "$TC" "$(cat diff.txt)")
+
+          REQ=$(jq -nc --arg m "$GATE_MODEL" --arg s "$SYSTEM" --arg u "$USER" \
+            '{model:$m, response_format:{type:"json_object"},
+              messages:[{role:"system",content:$s},{role:"user",content:$u}]}')
+
+          # Fail SAFE: any error here yields NO_GO (never auto-merges on a flaky gate).
+          VERDICT="NO_GO"; REASON="gate model call failed"
+          if RESP=$(curl -sS https://models.github.ai/inference/chat/completions \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "$REQ" 2>curl_err.txt); then
+            CONTENT=$(echo "$RESP" | jq -r '.choices[0].message.content // empty' 2>/dev/null || echo "")
+            if [[ -n "$CONTENT" ]] && echo "$CONTENT" | jq empty 2>/dev/null; then
+              V=$(echo "$CONTENT" | jq -r '.verdict // empty')
+              R=$(echo "$CONTENT" | jq -r '.reason // empty')
+              if [[ "$V" == "GO" || "$V" == "NO_GO" ]]; then VERDICT="$V"; REASON="${R:-no reason}"; fi
+            else
+              echo "::warning::Unexpected model response: $(echo "$RESP" | head -c 500)"
+            fi
+          else
+            echo "::warning::Model request failed: $(cat curl_err.txt | head -c 300)"
+          fi
+
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          echo "reason=$REASON" >> "$GITHUB_OUTPUT"
+          echo "Go/No-Go: $VERDICT — $REASON"
+
+      - name: Approve and merge (GO)
+        id: merge
+        if: steps.review.outputs.verdict == 'GO'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.locate.outputs.pr }}
+          REASON: ${{ steps.review.outputs.reason }}
+        run: |
+          set -euo pipefail
+          gh pr review "$PR" --repo "$REPO" --approve --body "Automated Go/No-Go: **GO**. ${REASON}"
+          gh pr merge "$PR" --repo "$REPO" --squash --delete-branch
+          echo "merged=true" >> "$GITHUB_OUTPUT"
+          echo "Merged PR #${PR}"
+
+      - name: Cut release (Elastic change)
+        if: steps.merge.outputs.merged == 'true' && steps.meta.outputs.elastic_changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EO: ${{ steps.meta.outputs.elastic_old }}
+          EN: ${{ steps.meta.outputs.elastic_new }}
+          TC: ${{ steps.meta.outputs.traefik_changed }}
+          TO: ${{ steps.meta.outputs.traefik_old }}
+          TN: ${{ steps.meta.outputs.traefik_new }}
+        run: |
+          set -euo pipefail
+          TAG="v${EN}"
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; skipping."; exit 0
+          fi
+
+          # Auto-generated notes (lists merged PRs since the previous release — so an
+          # interim Traefik-only PR is captured here automatically).
+          GEN=$(gh api "repos/${REPO}/releases/generate-notes" \
+            -f tag_name="$TAG" -f target_commitish=main --jq '.body' 2>/dev/null || echo "")
+
+          {
+            echo "**Elastic Stack \`${EO}\` → \`${EN}\`**"
+            if [[ "$TC" == "true" ]]; then
+              echo ""
+              echo "**Traefik \`${TO}\` → \`${TN}\`**"
+            fi
+            echo ""
+            echo "$GEN"
+          } > notes.md
+
+          gh release create "$TAG" --repo "$REPO" --target main --title "$TAG" --notes-file notes.md
+          echo "Released $TAG"
+
+      - name: Heads-up issue (major bump)
+        if: steps.merge.outputs.merged == 'true' && steps.meta.outputs.is_major == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EO: ${{ steps.meta.outputs.elastic_old }}
+          EN: ${{ steps.meta.outputs.elastic_new }}
+          PR: ${{ steps.locate.outputs.pr }}
+        run: |
+          set -euo pipefail
+          {
+            echo "@${MAINTAINER} — a **major** Elastic Stack bump shipped automatically (CI passed)."
+            echo ""
+            echo "- Elastic Stack: \`${EO}\` → \`${EN}\`"
+            echo "- Released as: \`v${EN}\`"
+            echo "- Source PR: #${PR}"
+            echo ""
+            echo "Majors can carry breaking changes that a green test suite won't surface. Worth a sanity check of the running stack and the upstream release notes."
+          } > major.md
+          gh issue create --repo "$REPO" \
+            --title "Heads-up: major Elastic bump v${EN} shipped automatically" \
+            --body-file major.md --label version-update || true
+
+      - name: Block and ping (NO_GO)
+        if: steps.review.outputs.verdict == 'NO_GO'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.locate.outputs.pr }}
+          REASON: ${{ steps.review.outputs.reason }}
+        run: |
+          set -euo pipefail
+          gh label create version-update-blocked --color fbca04 \
+            --description "Automated version update blocked pending human review" --force >/dev/null 2>&1 || true
+          {
+            echo "@${MAINTAINER} — automated **Go/No-Go = NO_GO**, merge blocked."
+            echo ""
+            echo "> ${REASON}"
+            echo ""
+            echo "CI passed, but the diff doesn't look like a clean version bump. Please review — there's nothing for the Copilot agent to fix here, it needs your eyes."
+          } > nogo.md
+          gh pr comment "$PR" --repo "$REPO" --body-file nogo.md
+          gh pr edit "$PR" --repo "$REPO" --add-label version-update-blocked || true
+
+      # ===== FAILURE PATH: escalate + dispatch Copilot coding agent =================
+      - name: Escalate broken release
+        id: escalate
+        if: steps.locate.outputs.proceed == 'true' && steps.ci.outputs.state == 'failed'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.locate.outputs.pr }}
+          EN: ${{ steps.meta.outputs.elastic_new }}
+          EO: ${{ steps.meta.outputs.elastic_old }}
+          FAILED_URLS: ${{ steps.ci.outputs.failed_urls }}
+        run: |
+          set -euo pipefail
+          gh label create "$FAILURE_LABEL" --color b60205 \
+            --description "Automated version update failed CI" --force >/dev/null 2>&1 || true
+
+          TITLE="Broken release: Elastic v${EN} fails CI"
+          # Dedup: one open issue per failing target version.
+          EXISTING=$(gh issue list --repo "$REPO" --state open --label "$FAILURE_LABEL" \
+            --search "${EN} in:title" --json number --jq '.[0].number' 2>/dev/null || echo "")
+
+          {
+            echo "## Failed checks"
+            echo ""
+            printf '%s\n' "$FAILED_URLS"
+            echo ""
+            echo "- Candidate: Elastic Stack \`${EO}\` → \`${EN}\`"
+            echo "- Source PR: #${PR}"
+          } > fail.md
+
+          if [[ -n "$EXISTING" ]]; then
+            {
+              echo "Still failing on a later run."
+              echo ""
+              cat fail.md
+            } > comment.md
+            gh issue comment "$EXISTING" --repo "$REPO" --body-file comment.md
+            echo "issue=$EXISTING" >> "$GITHUB_OUTPUT"
+            echo "created=false" >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "@${MAINTAINER} — the automated update to Elastic \`${EN}\` did not pass CI, so it was not released."
+              echo ""
+              cat fail.md
+              echo ""
+              echo "The Copilot coding agent has been asked to investigate a fix on the \`${PR_BRANCH}\` branch (PR #${PR})."
+            } > issue.md
+            URL=$(gh issue create --repo "$REPO" --title "$TITLE" \
+              --body-file issue.md --label "$FAILURE_LABEL" --assignee "$MAINTAINER")
+            NUM=$(echo "$URL" | grep -oE '[0-9]+$')
+            echo "issue=$NUM" >> "$GITHUB_OUTPUT"
+            echo "created=true" >> "$GITHUB_OUTPUT"
+            echo "Opened issue #${NUM}"
+          fi
+
+      - name: Dispatch Copilot coding agent
+        if: steps.escalate.outputs.created == 'true'
+        env:
+          # The Copilot assignment API rejects GitHub App / GITHUB_TOKEN (server-to-server)
+          # tokens — it requires a human PAT with Copilot access. So this one step uses a
+          # narrow fine-grained PAT (the maintainer's Copilot Pro account). Best-effort:
+          # the issue already exists and tags the maintainer regardless.
+          GH_TOKEN: ${{ secrets.COPILOT_AGENT_PAT }}
+          ISSUE: ${{ steps.escalate.outputs.issue }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          REPO_NAME="${REPO#*/}"
+          ISSUE_NODE=$(gh api "repos/${REPO}/issues/${ISSUE}" --jq '.node_id')
+          BOT_ID=$(gh api graphql -f query='
+            query($o:String!,$n:String!){
+              repository(owner:$o,name:$n){
+                suggestedActors(capabilities:[CAN_BE_ASSIGNED], first:50){
+                  nodes{ login __typename ... on Bot{ id } ... on User{ id } }
+                }
+              }
+            }' -F o="$OWNER" -F n="$REPO_NAME" \
+            --jq '.data.repository.suggestedActors.nodes[] | select(.login=="copilot-swe-agent") | .id' 2>/dev/null || echo "")
+
+          if [[ -z "$BOT_ID" ]]; then
+            echo "::warning::Copilot coding agent not assignable on this repo; issue left for the maintainer."
+            exit 0
+          fi
+          gh api graphql -f query='
+            mutation($a:ID!,$b:ID!){
+              replaceActorsForAssignable(input:{assignableId:$a, actorIds:[$b]}){
+                assignable{ ... on Issue { number } }
+              }
+            }' -F a="$ISSUE_NODE" -F b="$BOT_ID" \
+            && echo "Copilot coding agent dispatched on issue #${ISSUE}" \
+            || echo "::warning::Could not dispatch Copilot agent; issue #${ISSUE} left for the maintainer."
