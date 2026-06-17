@@ -34,9 +34,12 @@ permissions:
   models: read          # GitHub Models (openai/gpt-5) for the Go/No-Go verdict
   actions: read         # read CI run conclusions
 
+# The gate fires once per CI workflow completion (~4×). Cancel superseded runs so only
+# the latest — the one that sees ALL checks concluded — does the evaluation. This avoids
+# duplicate reviews/comments and a pile-up of concurrent model calls hitting the rate tier.
 concurrency:
   group: version-update-gate
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   PR_BRANCH: chore/version-update
@@ -194,23 +197,29 @@ jobs:
             '{model:$m, response_format:{type:"json_object"},
               messages:[{role:"system",content:$s},{role:"user",content:$u}]}')
 
-          # Fail SAFE: any error here yields NO_GO (never auto-merges on a flaky gate).
-          VERDICT="NO_GO"; REASON="gate model call failed"
-          if RESP=$(curl -sS https://models.github.ai/inference/chat/completions \
-                -H "Authorization: Bearer $GH_TOKEN" \
-                -H "Content-Type: application/json" \
-                -d "$REQ" 2>curl_err.txt); then
-            CONTENT=$(echo "$RESP" | jq -r '.choices[0].message.content // empty' 2>/dev/null || echo "")
-            if [[ -n "$CONTENT" ]] && echo "$CONTENT" | jq empty 2>/dev/null; then
-              V=$(echo "$CONTENT" | jq -r '.verdict // empty')
-              R=$(echo "$CONTENT" | jq -r '.reason // empty')
-              if [[ "$V" == "GO" || "$V" == "NO_GO" ]]; then VERDICT="$V"; REASON="${R:-no reason}"; fi
+          # Fail SAFE: if every attempt errors, the verdict stays NO_GO (never auto-merges
+          # on a flaky gate). Retry to ride out transient errors / rate-tier blips on the
+          # GitHub Models endpoint.
+          VERDICT="NO_GO"; REASON="gate model call failed after retries"
+          for attempt in 1 2 3; do
+            if RESP=$(curl -sS --max-time 60 https://models.github.ai/inference/chat/completions \
+                  -H "Authorization: Bearer $GH_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  -d "$REQ" 2>curl_err.txt); then
+              CONTENT=$(echo "$RESP" | jq -r '.choices[0].message.content // empty' 2>/dev/null || echo "")
+              if [[ -n "$CONTENT" ]] && echo "$CONTENT" | jq empty 2>/dev/null; then
+                V=$(echo "$CONTENT" | jq -r '.verdict // empty')
+                R=$(echo "$CONTENT" | jq -r '.reason // empty')
+                if [[ "$V" == "GO" || "$V" == "NO_GO" ]]; then
+                  VERDICT="$V"; REASON="${R:-no reason}"; break
+                fi
+              fi
+              echo "::warning::Attempt ${attempt}: unexpected model response: $(echo "$RESP" | head -c 300)"
             else
-              echo "::warning::Unexpected model response: $(echo "$RESP" | head -c 500)"
+              echo "::warning::Attempt ${attempt}: model request failed: $(head -c 200 curl_err.txt)"
             fi
-          else
-            echo "::warning::Model request failed: $(cat curl_err.txt | head -c 300)"
-          fi
+            sleep $(( attempt * 10 ))
+          done
 
           echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
           echo "reason=$REASON" >> "$GITHUB_OUTPUT"
@@ -294,6 +303,12 @@ jobs:
           REASON: ${{ steps.review.outputs.reason }}
         run: |
           set -euo pipefail
+          # Idempotent: if this PR is already blocked, don't post a duplicate comment.
+          if gh pr view "$PR" --repo "$REPO" --json labels --jq '.labels[].name' \
+               | grep -qx version-update-blocked; then
+            echo "PR #${PR} already blocked; skipping duplicate comment."
+            exit 0
+          fi
           gh label create version-update-blocked --color fbca04 \
             --description "Automated version update blocked pending human review" --force >/dev/null 2>&1 || true
           {
