@@ -182,7 +182,7 @@ jobs:
       - name: Start Elastic Stack with LLM
         run: |
           echo "Starting stack: mode=${{ matrix.ingress_mode }}, ingress=${{ matrix.enable_llm_ingress }}, profiles=${{ matrix.compose_profiles }}"
-          docker compose up -d --wait --wait-timeout 600 || {
+          docker compose up -d --wait --wait-timeout 900 || {
             echo "Startup had issues, checking status..."
             docker compose ps -a
             docker compose logs setup --tail=50
@@ -316,6 +316,7 @@ jobs:
           echo "=== Ollama ===" && docker compose logs ollama --tail=50
           echo "=== Setup ===" && docker compose logs setup --tail=50
           echo "=== ES ===" && docker compose logs es01 --tail=30
+          echo "=== Kibana ===" && docker compose logs kibana --tail=50
           echo "=== Traefik ===" && docker compose logs traefik --tail=30
 
       - name: Upload logs artifact
