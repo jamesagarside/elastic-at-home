@@ -685,17 +685,33 @@ test_inference_completion() {
     fi
 
     local opts=$(_curl_opts)
-    local response=$(curl $opts -u "${ELASTIC_USER}:${ELASTIC_PASSWORD}" \
-        -H "Content-Type: application/json" \
-        -X POST "${ELASTICSEARCH_URL}/_inference/completion/local-llm" \
-        -d '{"input":"Say hello in one word."}' 2>&1) || response=""
+    local max_attempts=3
+    local attempt=0
+    local response=""
+    local completion=""
 
-    local completion=$(json_get '.completion[0].result // .completion // empty' "$response")
+    # Retry up to max_attempts times — small models (e.g. gemma3:270m) occasionally
+    # generate an empty response (immediate EOS token) for short prompts.  A brief
+    # wait lets any in-flight inference settle before we retry.
+    while [[ $attempt -lt $max_attempts ]]; do
+        ((attempt++))
+        response=$(curl $opts -u "${ELASTIC_USER}:${ELASTIC_PASSWORD}" \
+            -H "Content-Type: application/json" \
+            -X POST "${ELASTICSEARCH_URL}/_inference/completion/local-llm" \
+            -d '{"input":"Say hello in one word."}' 2>&1) || response=""
 
-    if [[ -n "$completion" && "$completion" != "null" && "$completion" != "" ]]; then
-        record_pass "Inference completion returned a response"
-        return 0
-    fi
+        completion=$(json_get '.completion[0].result // .completion // empty' "$response")
+
+        if [[ -n "$completion" && "$completion" != "null" && "$completion" != "" ]]; then
+            record_pass "Inference completion returned a response"
+            return 0
+        fi
+
+        if [[ $attempt -lt $max_attempts ]]; then
+            log_info "Inference completion returned empty result (attempt $attempt/$max_attempts), retrying in 10s..."
+            sleep 10
+        fi
+    done
 
     LAST_RESPONSE="$response"
     record_fail "Inference completion returned no result"
