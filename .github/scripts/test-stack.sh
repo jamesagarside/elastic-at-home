@@ -686,6 +686,7 @@ test_inference_completion() {
 
     local opts=$(_curl_opts)
     local max_attempts=3
+    local retry_delay=10
     local attempt=0
     local response=""
     local completion=""
@@ -708,8 +709,8 @@ test_inference_completion() {
         fi
 
         if [[ $attempt -lt $max_attempts ]]; then
-            log_info "Inference completion returned empty result (attempt $attempt/$max_attempts), retrying in 10s..."
-            sleep 10
+            log_info "Inference completion returned empty result (attempt $attempt/$max_attempts), retrying in ${retry_delay}s..."
+            sleep "$retry_delay"
         fi
     done
 
