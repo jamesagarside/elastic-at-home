@@ -34,6 +34,7 @@ services:
       - FLEET_SERVER_CERT=/certs/fleet-server/fleet-server.crt
       - FLEET_SERVER_CERT_KEY=/certs/fleet-server/fleet-server.key
       - FLEET_SERVER_POLICY_ID=fleet-server-policy
+      - FLEET_SERVER_TIMEOUT=5m
       - CERTIFICATE_AUTHORITIES=/certs/ca/ca.crt
       - SSL_CERTIFICATE_AUTHORITIES=/certs/ca/ca.crt
       # Monitoring output configuration (OTel exporter uses these)
