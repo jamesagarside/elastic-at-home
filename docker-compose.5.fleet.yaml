@@ -34,6 +34,25 @@ services:
       - FLEET_SERVER_CERT=/certs/fleet-server/fleet-server.crt
       - FLEET_SERVER_CERT_KEY=/certs/fleet-server/fleet-server.key
       - FLEET_SERVER_POLICY_ID=fleet-server-policy
+      # Bootstrap timeouts.
+      #
+      # Fleet Server can only finish starting once Kibana has finished its
+      # *asynchronous* Fleet preconfiguration and added the fleet_server input
+      # to fleet-server-policy. Until then the agent logs
+      #   "Waiting on fleet-server input to be added to policy: fleet-server-policy"
+      # and elastic-agent's default 2m wait expires with
+      #   "timed out waiting for Fleet Server to start after 2m0s"
+      # which fails enrolment and burns one of the `restart: on-failure` attempts.
+      #
+      # On a Raspberry Pi, or a busy CI runner, or when Ollama is competing for
+      # memory, that preconfiguration routinely takes longer than 2 minutes, so
+      # give it a realistic window. Both are upper bounds — a healthy stack still
+      # bootstraps in well under a minute and does not wait for these to elapse.
+      #
+      # FLEET_ENROLL_TIMEOUT wraps the whole enrol, so it must exceed
+      # FLEET_SERVER_TIMEOUT or it becomes the effective (and confusing) limit.
+      - FLEET_SERVER_TIMEOUT=10m
+      - FLEET_ENROLL_TIMEOUT=15m
       - CERTIFICATE_AUTHORITIES=/certs/ca/ca.crt
       - SSL_CERTIFICATE_AUTHORITIES=/certs/ca/ca.crt
       # Monitoring output configuration (OTel exporter uses these)

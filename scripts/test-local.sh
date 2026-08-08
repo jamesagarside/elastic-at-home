@@ -196,7 +196,7 @@ write_env() {
         "AGENT_DOMAIN_NAME=agent.test.local"
         "TRAEFIK_DOMAIN_NAME=${traefik_domain}"
         "TRAEFIK_IP="
-        "ALLOWED_SYSLOG_IPS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+        "ALLOWED_SYSLOG_IPS=172.16.0.0/12"
         "KB_MEM_LIMIT=1073741824"
         "ES_MEM_LIMIT=2147483648"
         "FLEET_MEM_LIMIT=1073741824"
