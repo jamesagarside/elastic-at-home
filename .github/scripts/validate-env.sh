@@ -126,7 +126,12 @@ validate_syslog_ips() {
     [[ -f "$env_file" ]] || return 0
 
     local value
-    value=$(grep -E '^ALLOWED_SYSLOG_IPS=' "$env_file" | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true)
+    value=$(grep -E '^ALLOWED_SYSLOG_IPS=' "$env_file" | tail -1 | cut -d= -f2- || true)
+
+    # Strip a trailing inline comment (Compose treats " #" as one) and trim the
+    # edges — but deliberately NOT whitespace *inside* the value, or the
+    # space-separated check below could never fire.
+    value=$(printf '%s' "$value" | sed -e 's/[[:space:]]#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     [[ -n "$value" ]] || return 0
 
     if [[ "$value" == *,* || "$value" == *" "* ]]; then
