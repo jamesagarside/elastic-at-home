@@ -804,7 +804,10 @@ docker compose logs agent
    - **UDP:** `nc -u -zv <host-ip> 514` (UDP has no handshake, so a clean exit only confirms the socket is open; confirm receipt by watching agent logs or using your sender's test utility)
 2. Agent logs show the syslog input alive?
 3. Sender pointing at the right IP, port, and protocol?
-4. TCP only: is your source subnet in `ALLOWED_SYSLOG_IPS`?
+4. TCP only: is your source subnet in `ALLOWED_SYSLOG_IPS`? It must be a **single**
+   IP or CIDR — Traefik's `ClientIP` matcher takes one value, and a comma-separated
+   list makes Traefik drop the syslog router entirely (no traffic, no obvious error).
+   Use the smallest supernet that covers your senders, e.g. `10.0.0.0/8`.
 
 ### Memory / resource issues
 

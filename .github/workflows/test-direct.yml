@@ -69,9 +69,6 @@ jobs:
           echo "Docker Compose version:"
           docker compose version
 
-      - name: Validate .env.example completeness
-        run: bash .github/scripts/validate-env.sh
-
       - name: Create .env file
         env:
           STACK_VER: ${{ env.STACK_VERSION }}
@@ -96,7 +93,7 @@ jobs:
           EXTERNAL_ES_PORT=9200
           EXTERNAL_FLEET_PORT=8220
           EXTERNAL_APM_PORT=8200
-          ALLOWED_SYSLOG_IPS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+          ALLOWED_SYSLOG_IPS=172.16.0.0/12
           KB_MEM_LIMIT=1073741824
           ES_MEM_LIMIT=2147483648
           FLEET_MEM_LIMIT=1073741824
@@ -106,6 +103,11 @@ jobs:
           KB_OBJECTS_ENCRYPTIONKEY=ny6tYXoI3lYrRcpgMSMQAkrSBen8dE9K
           EOF
           sed -i 's/^[[:space:]]*//' .env
+
+      # Runs after .env is written so it validates the values CI actually
+      # deploys with, not just the documented defaults in .env.example.
+      - name: Validate environment configuration
+        run: bash .github/scripts/validate-env.sh
 
       - name: Increase vm.max_map_count for Elasticsearch
         run: |
@@ -208,9 +210,12 @@ jobs:
       - name: Wait for Fleet Server to be healthy
         run: |
           echo "Waiting for Fleet Server to be healthy..."
-          # 10 min: Fleet Server waits for Kibana to finish preconfiguring the
-          # fleet-server-policy, which can be slow on resource-constrained CI.
-          timeout 600 bash -c '
+          # 15 min: Fleet Server cannot report healthy until Kibana finishes its
+          # asynchronous Fleet preconfiguration and adds the fleet_server input
+          # to fleet-server-policy. On a loaded runner that regularly exceeds
+          # 10 min, and must stay above FLEET_SERVER_TIMEOUT (10m) in
+          # docker-compose.5.fleet.yaml so the container gets its full window.
+          timeout 900 bash -c '
             while true; do
               health=$(docker inspect --format="{{.State.Health.Status}}" elastic-at-home-fleet-server-1 2>/dev/null || echo "unknown")
               echo "Fleet Server health: $health"
@@ -307,6 +312,12 @@ jobs:
           echo ""
           echo "=== Agent Logs ==="
           docker compose logs agent --tail=50
+
+          # The upload step below publishes this file. Nothing used to write it,
+          # so every failed run uploaded nothing ("No files were found with the
+          # provided path"). Capture the FULL logs — Fleet/Kibana bootstrap
+          # failures are invisible in a 50-line tail.
+          docker compose logs --no-color --timestamps > docker-compose-logs.txt 2>&1 || true
 
       - name: Upload logs artifact
         if: failure()
