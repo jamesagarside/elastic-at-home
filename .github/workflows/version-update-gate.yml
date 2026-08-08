@@ -273,6 +273,32 @@ jobs:
           gh release create "$TAG" --repo "$REPO" --target main --title "$TAG" --notes-file notes.md
           echo "Released $TAG"
 
+      - name: Close stale broken-release issues
+        if: steps.merge.outputs.merged == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EN: ${{ steps.meta.outputs.elastic_new }}
+          PR: ${{ steps.locate.outputs.pr }}
+        run: |
+          set -euo pipefail
+          # A version that eventually ships is, by definition, not a broken release.
+          # CI here fails intermittently (Fleet Server bootstrap timing), so a version
+          # can fail one run and pass the next — and nothing used to retract the
+          # earlier escalation. That is why open "Broken release" issues for 9.4.3 and
+          # 9.4.4 outlived both releases, each with a Copilot PR still attached.
+          TITLE="Broken release: Elastic v${EN} fails CI"
+          NUMBERS=$(gh issue list --repo "$REPO" --state open --label "$FAILURE_LABEL" \
+            --limit 100 --json number,title 2>/dev/null \
+            | jq -r --arg t "$TITLE" 'map(select(.title == $t)) | .[].number' \
+            || echo "")
+
+          for n in $NUMBERS; do
+            gh issue comment "$n" --repo "$REPO" --body \
+              "Elastic \`${EN}\` has now passed CI and merged via PR #${PR}. The earlier failure did not reproduce, so this is no longer a broken release — closing automatically." || true
+            gh issue close "$n" --repo "$REPO" --reason completed || true
+            echo "Closed stale broken-release issue #${n}"
+          done
+
       - name: Heads-up issue (major bump)
         if: steps.merge.outputs.merged == 'true' && steps.meta.outputs.is_major == 'true'
         env:
@@ -338,8 +364,16 @@ jobs:
 
           TITLE="Broken release: Elastic v${EN} fails CI"
           # Dedup: one open issue per failing target version.
+          #
+          # This used to filter with `--search "${EN} in:title"`, which does not
+          # reliably match a dotted version — the search index tokenises "9.4.4"
+          # — so consecutive flaky runs opened duplicate issues for the same
+          # version (#23 and #25 were both "Broken release: Elastic v9.4.4").
+          # Match the title exactly instead; no search index involved.
           EXISTING=$(gh issue list --repo "$REPO" --state open --label "$FAILURE_LABEL" \
-            --search "${EN} in:title" --json number --jq '.[0].number' 2>/dev/null || echo "")
+            --limit 100 --json number,title 2>/dev/null \
+            | jq -r --arg t "$TITLE" 'map(select(.title == $t)) | .[0].number // empty' \
+            || echo "")
 
           {
             echo "## Failed checks"

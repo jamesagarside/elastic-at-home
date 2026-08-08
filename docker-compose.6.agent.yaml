@@ -109,6 +109,12 @@ services:
       # ClientIP rule restricts which source IPs can send syslog.
       # This is a security measure - you don't want random internet hosts
       # flooding your syslog receiver.
+      #
+      # ALLOWED_SYSLOG_IPS must be a SINGLE IP or CIDR. Traefik v3's ClientIP
+      # matcher takes exactly one value; a comma-separated list fails to parse
+      # and Traefik drops this router entirely — syslog then goes nowhere with
+      # no obvious error. Use a supernet (e.g. 10.0.0.0/8) to cover multiple
+      # subnets. .github/scripts/validate-env.sh enforces this.
       # ---------------------------------------------------------------------
       - "traefik.tcp.routers.agent-tcp.rule=ClientIP(`${ALLOWED_SYSLOG_IPS}`)"
       - "traefik.tcp.routers.agent-tcp.entrypoints=syslog-tcp"

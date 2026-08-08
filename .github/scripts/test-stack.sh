@@ -685,20 +685,39 @@ test_inference_completion() {
     fi
 
     local opts=$(_curl_opts)
-    local response=$(curl $opts -u "${ELASTIC_USER}:${ELASTIC_PASSWORD}" \
-        -H "Content-Type: application/json" \
-        -X POST "${ELASTICSEARCH_URL}/_inference/completion/local-llm" \
-        -d '{"input":"Say hello in one word."}' 2>&1) || response=""
+    local max_attempts=3
+    local retry_delay=10
+    local attempt=0
+    local response=""
+    local completion=""
 
-    local completion=$(json_get '.completion[0].result // .completion // empty' "$response")
+    # A tiny model (gemma3:270m) will occasionally emit an immediate EOS for a
+    # short prompt, returning an empty completion. That is a property of the
+    # model, not a broken stack, so retry before failing — a genuinely broken
+    # inference endpoint stays empty across all attempts.
+    while [[ $attempt -lt $max_attempts ]]; do
+        attempt=$((attempt + 1))
 
-    if [[ -n "$completion" && "$completion" != "null" && "$completion" != "" ]]; then
-        record_pass "Inference completion returned a response"
-        return 0
-    fi
+        response=$(curl $opts -u "${ELASTIC_USER}:${ELASTIC_PASSWORD}" \
+            -H "Content-Type: application/json" \
+            -X POST "${ELASTICSEARCH_URL}/_inference/completion/local-llm" \
+            -d '{"input":"Say hello in one word."}' 2>&1) || response=""
+
+        completion=$(json_get '.completion[0].result // .completion // empty' "$response")
+
+        if [[ -n "$completion" && "$completion" != "null" ]]; then
+            record_pass "Inference completion returned a response (attempt $attempt/$max_attempts)"
+            return 0
+        fi
+
+        if [[ $attempt -lt $max_attempts ]]; then
+            log_info "Empty completion (attempt $attempt/$max_attempts), retrying in ${retry_delay}s..."
+            sleep "$retry_delay"
+        fi
+    done
 
     LAST_RESPONSE="$response"
-    record_fail "Inference completion returned no result"
+    record_fail "Inference completion returned no result after $max_attempts attempts"
     return 1
 }
 

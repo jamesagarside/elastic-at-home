@@ -111,10 +111,54 @@ if [[ ${#stale[@]} -gt 0 ]]; then
     echo ""
 fi
 
+# -----------------------------------------------------------------------------
+# ALLOWED_SYSLOG_IPS must be a single IP or CIDR
+# -----------------------------------------------------------------------------
+# It is interpolated into Traefik's ClientIP matcher:
+#     traefik.tcp.routers.agent-tcp.rule=ClientIP(`${ALLOWED_SYSLOG_IPS}`)
+# Traefik v3's ClientIP matcher accepts exactly one value. A comma-separated
+# list fails to parse, so Traefik drops the syslog-tcp router and syslog stops
+# being routed — with no failure visible from the stack's own tests. Catch it
+# here instead.
+# -----------------------------------------------------------------------------
+validate_syslog_ips() {
+    local env_file="$1"
+    [[ -f "$env_file" ]] || return 0
+
+    local value
+    value=$(grep -E '^ALLOWED_SYSLOG_IPS=' "$env_file" | tail -1 | cut -d= -f2- || true)
+
+    # Strip a trailing inline comment (Compose treats " #" as one) and trim the
+    # edges — but deliberately NOT whitespace *inside* the value, or the
+    # space-separated check below could never fire.
+    value=$(printf '%s' "$value" | sed -e 's/[[:space:]]#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [[ -n "$value" ]] || return 0
+
+    if [[ "$value" == *,* || "$value" == *" "* ]]; then
+        echo -e "${RED}[FAIL]${NC} $(basename "$env_file"): ALLOWED_SYSLOG_IPS must be a single IP or CIDR"
+        echo -e "  got: ${RED}${value}${NC}"
+        echo "  Traefik's ClientIP matcher takes one value — use a supernet (e.g. 10.0.0.0/8)."
+        return 1
+    fi
+
+    # Basic shape check: IPv4 address with an optional /prefix.
+    if [[ ! "$value" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]]; then
+        echo -e "${YELLOW}[WARN]${NC} $(basename "$env_file"): ALLOWED_SYSLOG_IPS='${value}' is not a plain IPv4 address or CIDR"
+        echo "  Traefik will reject it and drop the syslog-tcp router if it cannot be parsed."
+    fi
+
+    return 0
+}
+
+for env_file in "$ENV_EXAMPLE" "$PROJECT_DIR/.env"; do
+    validate_syslog_ips "$env_file" || result=1
+done
+echo ""
+
 if [[ $result -eq 0 ]]; then
-    echo -e "${GREEN}[PASS]${NC} All required variables are documented in .env.example"
+    echo -e "${GREEN}[PASS]${NC} Environment configuration looks good"
 else
-    echo -e "${RED}[FAIL]${NC} .env.example is incomplete - add the missing variables"
+    echo -e "${RED}[FAIL]${NC} Environment configuration is invalid — see the failures above"
 fi
 
 exit $result

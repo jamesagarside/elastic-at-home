@@ -178,7 +178,7 @@ services:
         echo "Waiting for Elasticsearch availability";
         until curl -s --cacert config/certs/ca/ca.crt https://es01:9200 | grep -q "missing authentication credentials"; do sleep 10; done;
         echo "Waiting for Elasticsearch security initialisation";
-        until curl -s --cacert config/certs/ca/ca.crt -u "elastic:${ELASTIC_PASSWORD}" https://es01:9200 | grep -q '"cluster_name"'; do sleep 10; done;
+        until curl -s --cacert config/certs/ca/ca.crt -u "elastic:${ELASTIC_PASSWORD}" https://es01:9200 | grep -q "\"cluster_name\""; do sleep 10; done;
 
         # =====================================================================
         # STEP 5: SET KIBANA_SYSTEM PASSWORD
@@ -209,7 +209,7 @@ services:
           echo "Ollama detected, waiting for model to be ready...";
           # Resolve the effective model name up-front so the readiness probe
           # greps for it specifically (avoids a false positive on the empty
-          # '{"models":[]}' response that Ollama returns before the pull).
+          # {"models":[]} response that Ollama returns before the pull).
           LLM_EFFECTIVE_MODEL="${LLM_MODEL:-gemma4:e2b}";
           if [ "${LLM_DISABLE_THINKING:-false}" = "true" ]; then
             LLM_EFFECTIVE_MODEL="${LLM_MODEL:-gemma4:e2b}-fast";
@@ -296,8 +296,14 @@ services:
                 "https://kibana:5601/api/actions/connector" \
                 -d "{\"connector_type_id\":\".gen-ai\",\"name\":\"Local LLM (Ollama)\",\"config\":{\"apiProvider\":\"Other\",\"apiUrl\":\"http://ollama:11434/v1/chat/completions\",\"defaultModel\":\"$$LLM_EFFECTIVE_MODEL\",\"enableNativeFunctionCalling\":false},\"secrets\":{\"apiKey\":\"${LLM_API_KEY:-not-needed}\"}}" \
                 2>&1);
-              if echo "$$connector_response" | grep -q '"id"'; then
-                connector_id=$$(echo "$$connector_response" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4);
+              # NOTE: this whole script is one single-quoted argument to bash -c,
+              # so a literal apostrophe anywhere below ends that argument early.
+              # Quote JSON with escaped double quotes only. An earlier version
+              # used single quotes here and silently mangled the pipeline into
+              # "grep: 4: No such file or directory", always logging a blank id.
+              # This comment avoids apostrophes for the same reason.
+              if echo "$$connector_response" | grep -q "\"id\""; then
+                connector_id=$$(echo "$$connector_response" | grep -o "\"id\":\"[^\"]*\"" | head -1 | cut -d"\"" -f4);
                 echo "Kibana GenAI connector created successfully (id: $$connector_id)";
                 break;
               elif echo "$$connector_response" | grep -q "already exists"; then
