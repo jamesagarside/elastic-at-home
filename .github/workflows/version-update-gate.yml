@@ -210,84 +210,119 @@ jobs:
             note "PR metadata reports no version change at all"
           fi
 
-          # --- 1. The changed-file set must match the claim exactly -------------------
-          # Not "is a subset of an allowlist": if elastic_changed=true then .env.example
-          # and the README badge MUST both move, and if it is false they must NOT.
-          EXPECTED_FILES=()
-          [[ "$EC" == "true" ]] && EXPECTED_FILES+=(".env.example" "README.md")
-          [[ "$TC" == "true" ]] && EXPECTED_FILES+=("docker-compose.1.traefik.yaml")
-
-          # Compared via files rather than arrays: EXPECTED_FILES is legitimately empty
-          # when the metadata claims no change, and an empty-array expansion would
-          # otherwise smuggle a blank entry into the comparison.
-          printf '%s\n' ${EXPECTED_FILES[@]+"${EXPECTED_FILES[@]}"} | sed '/^$/d' | sort -u > wanted.txt
-          gh pr diff "$PR" --repo "$REPO" --name-only | sed '/^$/d' | sort -u > changed.txt
-
-          while IFS= read -r f; do
-            grep -qxF "$f" wanted.txt || note "unexpected file changed: ${f}"
-          done < changed.txt
-          while IFS= read -r f; do
-            grep -qxF "$f" changed.txt || note "expected file did not change: ${f}"
-          done < wanted.txt
-
-          # --- 2. Every changed line must be one of the expected version edits --------
-          # Walk the unified diff tracking the current file, and match each +/- line
-          # against the single edit that file is permitted to contain. Anything else —
-          # an extra line, a different value, a stray edit riding along in an allowed
-          # file — falls through to NO_GO.
-          gh pr diff "$PR" --repo "$REPO" > diff.txt
-
-          # Filename comes from the `diff --git` header rather than `+++ b/...`, and the
-          # header/hunk boundary is tracked explicitly: everything before a file's first
-          # @@ is header (index/mode/---/+++/binary/rename), everything after is content.
-          # Two reasons this matters. A deletion ends its header with `+++ /dev/null`, so
-          # keying on `+++ b/` would leave FILE pointing at the *previous* file and
-          # misattribute the reason. And a content line reading "++ b/foo" appears in the
-          # diff as "+++ b/foo", which a positional match would mistake for a header —
-          # letting a smuggled line slip past unexamined.
-          FILE=""; IN_HUNK=0
-          ENV_OLD=0; ENV_NEW=0; RDM_OLD=0; RDM_NEW=0; TRF_OLD=0; TRF_NEW=0
-          while IFS= read -r line; do
-            case "$line" in
-              'diff --git '*)
-                REST="${line#diff --git }"
-                FILE="${REST##* b/}"          # b-side name; a/ and b/ agree except on rename
-                IN_HUNK=0
-                continue ;;
-              '@@'*) IN_HUNK=1; continue ;;
-            esac
-            (( IN_HUNK )) || continue          # still in this file's header block
-            SIGN="${line:0:1}"
-            [[ "$SIGN" == "+" || "$SIGN" == "-" ]] || continue   # context line
-            BODY="${line:1}"
-
-            OK=0
-            case "$FILE" in
-              .env.example)
-                if [[ "$SIGN" == "-" && "$BODY" =~ ^STACK_VERSION=${EOR}$ ]]; then OK=1; ENV_OLD=1; fi
-                if [[ "$SIGN" == "+" && "$BODY" =~ ^STACK_VERSION=${ENR}$ ]]; then OK=1; ENV_NEW=1; fi
-                ;;
-              README.md)
-                if [[ "$SIGN" == "-" && "$BODY" == *"img.shields.io/badge/Elastic-${EO}-"* ]]; then OK=1; RDM_OLD=1; fi
-                if [[ "$SIGN" == "+" && "$BODY" == *"img.shields.io/badge/Elastic-${EN}-"* ]]; then OK=1; RDM_NEW=1; fi
-                ;;
-              docker-compose.1.traefik.yaml)
-                if [[ "$SIGN" == "-" && "$BODY" =~ ^[[:space:]]*image:[[:space:]]*traefik:v${TOR}[[:space:]]*$ ]]; then OK=1; TRF_OLD=1; fi
-                if [[ "$SIGN" == "+" && "$BODY" =~ ^[[:space:]]*image:[[:space:]]*traefik:v${TNR}[[:space:]]*$ ]]; then OK=1; TRF_NEW=1; fi
-                ;;
-            esac
-            if [[ "$OK" != "1" ]]; then
-              note "unexpected ${SIGN} line in ${FILE:-<unknown file>}: ${BODY:0:80}"
-            fi
-          done < diff.txt
-
-          # --- 3. Each claimed change must actually be present ------------------------
-          if [[ "$EC" == "true" ]]; then
-            (( ENV_OLD && ENV_NEW )) || note "STACK_VERSION ${EO} -> ${EN} not found in .env.example"
-            (( RDM_OLD && RDM_NEW )) || note "README Elastic badge ${EO} -> ${EN} not found"
+          # --- 0. Fetch, without letting a transport error abort the step -------------
+          # `gh` failing is not the same as a bad diff, but under `set -e` it would kill
+          # the step outright — and a dead step emits no verdict, so the NO_GO comment
+          # never posts and the PR sits blocked with no explanation at all. That is the
+          # exact failure this workflow is being changed to stop producing. So a fetch
+          # error becomes a NO_GO carrying its own reason, and the step still succeeds.
+          FETCHED=1
+          if ! gh pr diff "$PR" --repo "$REPO" --name-only > changed_raw.txt 2> gh_err.txt; then
+            note "could not fetch the PR file list: $(head -c 120 gh_err.txt | tr -d '\n')"
+            FETCHED=0
           fi
-          if [[ "$TC" == "true" ]]; then
-            (( TRF_OLD && TRF_NEW )) || note "traefik image v${TO} -> v${TN} not found"
+          if ! gh pr diff "$PR" --repo "$REPO" > diff.txt 2> gh_err.txt; then
+            note "could not fetch the PR diff: $(head -c 120 gh_err.txt | tr -d '\n')"
+            FETCHED=0
+          fi
+
+          if (( FETCHED )); then
+            # --- 1. The changed-file set must match the claim exactly -----------------
+            # Not "is a subset of an allowlist": if elastic_changed=true then
+            # .env.example and the README badge MUST both move, and if it is false they
+            # must NOT.
+            EXPECTED_FILES=()
+            [[ "$EC" == "true" ]] && EXPECTED_FILES+=(".env.example" "README.md")
+            [[ "$TC" == "true" ]] && EXPECTED_FILES+=("docker-compose.1.traefik.yaml")
+
+            # Compared via files rather than arrays: EXPECTED_FILES is legitimately empty
+            # when the metadata claims no change, and an empty-array expansion would
+            # otherwise smuggle a blank entry into the comparison.
+            printf '%s\n' ${EXPECTED_FILES[@]+"${EXPECTED_FILES[@]}"} | sed '/^$/d' | sort -u > wanted.txt
+            sed '/^$/d' changed_raw.txt | sort -u > changed.txt
+
+            while IFS= read -r f; do
+              grep -qxF "$f" wanted.txt || note "unexpected file changed: ${f}"
+            done < changed.txt
+            while IFS= read -r f; do
+              grep -qxF "$f" changed.txt || note "expected file did not change: ${f}"
+            done < wanted.txt
+
+            # --- 2. Every changed line must be one of the expected version edits ------
+            # Walk the unified diff tracking the current file, and match each +/- line
+            # against the single edit that file is permitted to contain. Anything else —
+            # an extra line, a different value, a stray edit riding along in an allowed
+            # file — falls through to NO_GO.
+            #
+            # Filename comes from the `diff --git` header rather than `+++ b/...`, and
+            # the header/hunk boundary is tracked explicitly: everything before a file's
+            # first @@ is header, everything after is content. Two reasons. A deletion
+            # ends its header with `+++ /dev/null`, so keying on `+++ b/` would leave
+            # FILE pointing at the *previous* file and misattribute the reason. And a
+            # content line reading "++ b/foo" appears in the diff as "+++ b/foo", which a
+            # positional match would mistake for a header — letting a line slip past
+            # unexamined.
+            FILE=""; IN_HUNK=0
+            ENV_OLD=0; ENV_NEW=0; RDM_OLD=0; RDM_NEW=0; TRF_OLD=0; TRF_NEW=0
+            RDM_MINUS=""; RDM_PLUS=""
+            while IFS= read -r line; do
+              case "$line" in
+                'diff --git '*)
+                  REST="${line#diff --git }"
+                  FILE="${REST##* b/}"        # b-side name; a/ and b/ agree except on rename
+                  IN_HUNK=0
+                  continue ;;
+                '@@'*) IN_HUNK=1; continue ;;
+              esac
+              (( IN_HUNK )) || continue        # still in this file's header block
+              SIGN="${line:0:1}"
+              [[ "$SIGN" == "+" || "$SIGN" == "-" ]] || continue   # context line
+              BODY="${line:1}"
+
+              OK=0
+              case "$FILE" in
+                .env.example)
+                  if [[ "$SIGN" == "-" && "$BODY" =~ ^STACK_VERSION=${EOR}$ ]]; then OK=1; ENV_OLD=$((ENV_OLD+1)); fi
+                  if [[ "$SIGN" == "+" && "$BODY" =~ ^STACK_VERSION=${ENR}$ ]]; then OK=1; ENV_NEW=$((ENV_NEW+1)); fi
+                  ;;
+                README.md)
+                  # Substring-matched only to *identify* the badge line; whether it is
+                  # an acceptable edit is decided below by comparing it against its
+                  # counterpart. Anchoring the whole line here instead would mean
+                  # hardcoding the badge's exact markup.
+                  if [[ "$SIGN" == "-" && "$BODY" == *"img.shields.io/badge/Elastic-${EO}-"* ]]; then OK=1; RDM_OLD=$((RDM_OLD+1)); RDM_MINUS="$BODY"; fi
+                  if [[ "$SIGN" == "+" && "$BODY" == *"img.shields.io/badge/Elastic-${EN}-"* ]]; then OK=1; RDM_NEW=$((RDM_NEW+1)); RDM_PLUS="$BODY"; fi
+                  ;;
+                docker-compose.1.traefik.yaml)
+                  if [[ "$SIGN" == "-" && "$BODY" =~ ^[[:space:]]*image:[[:space:]]*traefik:v${TOR}[[:space:]]*$ ]]; then OK=1; TRF_OLD=$((TRF_OLD+1)); fi
+                  if [[ "$SIGN" == "+" && "$BODY" =~ ^[[:space:]]*image:[[:space:]]*traefik:v${TNR}[[:space:]]*$ ]]; then OK=1; TRF_NEW=$((TRF_NEW+1)); fi
+                  ;;
+              esac
+              if [[ "$OK" != "1" ]]; then
+                note "unexpected ${SIGN} line in ${FILE:-<unknown file>}: ${BODY:0:80}"
+              fi
+            done < diff.txt
+
+            # --- 3. Each claimed change must be present, exactly once -----------------
+            # Counted, not flagged: two lines that each look right are still not "exactly
+            # the expected version bump".
+            if [[ "$EC" == "true" ]]; then
+              (( ENV_OLD == 1 && ENV_NEW == 1 )) \
+                || note "expected exactly one STACK_VERSION ${EO} -> ${EN} edit, saw ${ENV_OLD}/${ENV_NEW}"
+              (( RDM_OLD == 1 && RDM_NEW == 1 )) \
+                || note "expected exactly one README badge ${EO} -> ${EN} edit, saw ${RDM_OLD}/${RDM_NEW}"
+              # The badge line must be identical to its counterpart apart from the
+              # version itself. Matching only the shields.io substring would let the rest
+              # of the line change freely — including the link target the badge points
+              # at, on the project's front page.
+              if (( RDM_OLD == 1 && RDM_NEW == 1 )) && [[ "${RDM_MINUS//${EO}/${EN}}" != "$RDM_PLUS" ]]; then
+                note "README badge line changed beyond the version: ${RDM_PLUS:0:80}"
+              fi
+            fi
+            if [[ "$TC" == "true" ]]; then
+              (( TRF_OLD == 1 && TRF_NEW == 1 )) \
+                || note "expected exactly one traefik image v${TO} -> v${TN} edit, saw ${TRF_OLD}/${TRF_NEW}"
+            fi
           fi
 
           if [[ "$VERDICT" == "GO" ]]; then
@@ -419,7 +454,7 @@ jobs:
             echo ""
             echo "> ${REASON}"
             echo ""
-            echo "CI passed, but the diff is not exactly the expected version bump — see the reason above for what did not line up. Please review; there's nothing for the Copilot agent to fix here, it needs your eyes."
+            echo "CI passed, but the gate did not clear this PR for auto-merge — the reason above says exactly what did not line up. Please review; there's nothing for the Copilot agent to fix here, it needs your eyes."
           } > nogo.md
           gh pr comment "$PR" --repo "$REPO" --body-file nogo.md
           gh pr edit "$PR" --repo "$REPO" --add-label version-update-blocked || true
