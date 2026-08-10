@@ -262,19 +262,43 @@ jobs:
             # content line reading "++ b/foo" appears in the diff as "+++ b/foo", which a
             # positional match would mistake for a header — letting a line slip past
             # unexamined.
-            FILE=""; IN_HUNK=0
+            FILE=""; IN_HUNK=0; NL_MARKS=0
             ENV_OLD=0; ENV_NEW=0; RDM_OLD=0; RDM_NEW=0; TRF_OLD=0; TRF_NEW=0
             RDM_MINUS=""; RDM_PLUS=""
+
+            # "\ No newline at end of file" is emitted per side, so a bump that leaves
+            # the trailing newline alone produces two markers for the file and one that
+            # changes it produces one. Each allowed file may contain exactly one -/+
+            # pair, so an odd count for a file means the newline state moved too.
+            check_nl() { (( NL_MARKS % 2 == 0 )) || note "trailing-newline change in ${FILE:-<unknown file>}"; }
+
             while IFS= read -r line; do
               case "$line" in
                 'diff --git '*)
+                  check_nl                    # close out the file that just ended
                   REST="${line#diff --git }"
                   FILE="${REST##* b/}"        # b-side name; a/ and b/ agree except on rename
-                  IN_HUNK=0
+                  IN_HUNK=0; NL_MARKS=0
                   continue ;;
                 '@@'*) IN_HUNK=1; continue ;;
               esac
-              (( IN_HUNK )) || continue        # still in this file's header block
+
+              if (( ! IN_HUNK )); then
+                # Still in this file's header block. Not everything a diff can express
+                # shows up as a +/- line: a mode flip, rename or binary marker lives
+                # here and would otherwise ride along inside an allowed file unexamined
+                # (a chmod +x on .env.example passed as GO before this check). Only the
+                # inert header lines are accepted; anything else is a structural change.
+                case "$line" in
+                  'index '*|'--- '*|'+++ '*) ;;
+                  *) note "unexpected diff metadata in ${FILE:-<unknown file>}: ${line:0:80}" ;;
+                esac
+                continue
+              fi
+
+              case "$line" in
+                '\'*) NL_MARKS=$((NL_MARKS+1)); continue ;;
+              esac
               SIGN="${line:0:1}"
               [[ "$SIGN" == "+" || "$SIGN" == "-" ]] || continue   # context line
               BODY="${line:1}"
@@ -302,6 +326,7 @@ jobs:
                 note "unexpected ${SIGN} line in ${FILE:-<unknown file>}: ${BODY:0:80}"
               fi
             done < diff.txt
+            check_nl                        # and the last file in the diff
 
             # --- 3. Each claimed change must be present, exactly once -----------------
             # Counted, not flagged: two lines that each look right are still not "exactly
