@@ -31,12 +31,11 @@ permissions:
   contents: write       # cut release / tag
   pull-requests: write  # approve, merge, comment
   issues: write         # escalation + major heads-up issues
-  models: read          # GitHub Models (openai/gpt-5) for the Go/No-Go verdict
   actions: read         # read CI run conclusions
 
 # The gate fires once per CI workflow completion (~4×). Cancel superseded runs so only
 # the latest — the one that sees ALL checks concluded — does the evaluation. This avoids
-# duplicate reviews/comments and a pile-up of concurrent model calls hitting the rate tier.
+# duplicate reviews/comments and a pile-up of concurrent evaluations of the same PR.
 concurrency:
   group: version-update-gate
   cancel-in-progress: true
@@ -44,7 +43,6 @@ concurrency:
 env:
   PR_BRANCH: chore/version-update
   FAILURE_LABEL: version-update-failure
-  GATE_MODEL: openai/gpt-5
   MAINTAINER: jamesagarside
   REPO: ${{ github.repository }}
 
@@ -173,7 +171,16 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       # ===== GREEN PATH: Go/No-Go review ===========================================
-      - name: Go/No-Go review (GitHub Models)
+      # The rule being enforced here is entirely mechanical — "exactly these version
+      # strings, in exactly these files, and nothing else" — and the expected values
+      # are already known from the PR metadata parsed above. So it is checked directly
+      # against the diff rather than asked of a model.
+      #
+      # This used to be a GitHub Models call (openai/gpt-5). That endpoint is being
+      # retired and returned github_models_retirement_brownout on every attempt, which
+      # tripped the fail-safe and left a green, clean 9.5.0 bump blocked as NO_GO. A
+      # decidable check should not depend on a remote service being up. See ADR 0001.
+      - name: Go/No-Go review (deterministic diff check)
         id: review
         if: steps.locate.outputs.proceed == 'true' && steps.ci.outputs.state == 'green'
         env:
@@ -187,39 +194,96 @@ jobs:
           TC: ${{ steps.meta.outputs.traefik_changed }}
         run: |
           set -euo pipefail
-          gh pr diff "$PR" --repo "$REPO" > diff.txt || true
 
-          SYSTEM='You are a release gatekeeper for a Docker Compose repository. You receive a git diff for an AUTOMATED dependency version bump plus the expected version changes. Return GO only if the diff contains NOTHING beyond the expected version-string updates. Reply with strict JSON only: {"verdict":"GO"|"NO_GO","reason":"<=200 chars"}.'
-          USER=$(printf 'Expected: Elastic %s -> %s (changed=%s), Traefik %s -> %s (changed=%s).\nFiles that may legitimately change: .env.example (STACK_VERSION line), README.md (Elastic badge), docker-compose.1.traefik.yaml (traefik image tag). Any other file, any extra change, or a version that does not match the expected values is NO_GO.\n\n--- DIFF ---\n%s\n' \
-            "$EO" "$EN" "$EC" "$TO" "$TN" "$TC" "$(cat diff.txt)")
+          VERDICT="GO"
+          REASONS=()
+          note() { VERDICT="NO_GO"; REASONS+=("$1"); }
 
-          REQ=$(jq -nc --arg m "$GATE_MODEL" --arg s "$SYSTEM" --arg u "$USER" \
-            '{model:$m, response_format:{type:"json_object"},
-              messages:[{role:"system",content:$s},{role:"user",content:$u}]}')
+          # Versions are interpolated into regexes below, so escape regex metacharacters:
+          # unescaped, "9.4.4" would also match "91444".
+          esc() { printf '%s' "$1" | sed -e 's/[][\\.^$*+?(){}|]/\\&/g'; }
+          EOR=$(esc "$EO"); ENR=$(esc "$EN")
+          TOR=$(esc "$TO"); TNR=$(esc "$TN")
 
-          # Fail SAFE: if every attempt errors, the verdict stays NO_GO (never auto-merges
-          # on a flaky gate). Retry to ride out transient errors / rate-tier blips on the
-          # GitHub Models endpoint.
-          VERDICT="NO_GO"; REASON="gate model call failed after retries"
-          for attempt in 1 2 3; do
-            if RESP=$(curl -sS --max-time 60 https://models.github.ai/inference/chat/completions \
-                  -H "Authorization: Bearer $GH_TOKEN" \
-                  -H "Content-Type: application/json" \
-                  -d "$REQ" 2>curl_err.txt); then
-              CONTENT=$(echo "$RESP" | jq -r '.choices[0].message.content // empty' 2>/dev/null || echo "")
-              if [[ -n "$CONTENT" ]] && echo "$CONTENT" | jq empty 2>/dev/null; then
-                V=$(echo "$CONTENT" | jq -r '.verdict // empty')
-                R=$(echo "$CONTENT" | jq -r '.reason // empty')
-                if [[ "$V" == "GO" || "$V" == "NO_GO" ]]; then
-                  VERDICT="$V"; REASON="${R:-no reason}"; break
-                fi
-              fi
-              echo "::warning::Attempt ${attempt}: unexpected model response: $(echo "$RESP" | head -c 300)"
-            else
-              echo "::warning::Attempt ${attempt}: model request failed: $(head -c 200 curl_err.txt)"
+          # A bump that claims to change nothing has nothing to release.
+          if [[ "$EC" != "true" && "$TC" != "true" ]]; then
+            note "PR metadata reports no version change at all"
+          fi
+
+          # --- 1. The changed-file set must match the claim exactly -------------------
+          # Not "is a subset of an allowlist": if elastic_changed=true then .env.example
+          # and the README badge MUST both move, and if it is false they must NOT.
+          EXPECTED_FILES=()
+          [[ "$EC" == "true" ]] && EXPECTED_FILES+=(".env.example" "README.md")
+          [[ "$TC" == "true" ]] && EXPECTED_FILES+=("docker-compose.1.traefik.yaml")
+
+          # Compared via files rather than arrays: EXPECTED_FILES is legitimately empty
+          # when the metadata claims no change, and an empty-array expansion would
+          # otherwise smuggle a blank entry into the comparison.
+          printf '%s\n' ${EXPECTED_FILES[@]+"${EXPECTED_FILES[@]}"} | sed '/^$/d' | sort -u > wanted.txt
+          gh pr diff "$PR" --repo "$REPO" --name-only | sed '/^$/d' | sort -u > changed.txt
+
+          while IFS= read -r f; do
+            grep -qxF "$f" wanted.txt || note "unexpected file changed: ${f}"
+          done < changed.txt
+          while IFS= read -r f; do
+            grep -qxF "$f" changed.txt || note "expected file did not change: ${f}"
+          done < wanted.txt
+
+          # --- 2. Every changed line must be one of the expected version edits --------
+          # Walk the unified diff tracking the current file, and match each +/- line
+          # against the single edit that file is permitted to contain. Anything else —
+          # an extra line, a different value, a stray edit riding along in an allowed
+          # file — falls through to NO_GO.
+          gh pr diff "$PR" --repo "$REPO" > diff.txt
+
+          FILE=""
+          ENV_OLD=0; ENV_NEW=0; RDM_OLD=0; RDM_NEW=0; TRF_OLD=0; TRF_NEW=0
+          while IFS= read -r line; do
+            case "$line" in
+              '+++ b/'*) FILE="${line#+++ b/}"; continue ;;
+              '--- '*|'diff --git '*|'index '*|'@@'*|'new file mode'*|'deleted file mode'*|'similarity index'*|'rename '*) continue ;;
+            esac
+            SIGN="${line:0:1}"
+            [[ "$SIGN" == "+" || "$SIGN" == "-" ]] || continue   # context line
+            BODY="${line:1}"
+
+            OK=0
+            case "$FILE" in
+              .env.example)
+                if [[ "$SIGN" == "-" && "$BODY" =~ ^STACK_VERSION=${EOR}$ ]]; then OK=1; ENV_OLD=1; fi
+                if [[ "$SIGN" == "+" && "$BODY" =~ ^STACK_VERSION=${ENR}$ ]]; then OK=1; ENV_NEW=1; fi
+                ;;
+              README.md)
+                if [[ "$SIGN" == "-" && "$BODY" == *"img.shields.io/badge/Elastic-${EO}-"* ]]; then OK=1; RDM_OLD=1; fi
+                if [[ "$SIGN" == "+" && "$BODY" == *"img.shields.io/badge/Elastic-${EN}-"* ]]; then OK=1; RDM_NEW=1; fi
+                ;;
+              docker-compose.1.traefik.yaml)
+                if [[ "$SIGN" == "-" && "$BODY" =~ ^[[:space:]]*image:[[:space:]]*traefik:v${TOR}[[:space:]]*$ ]]; then OK=1; TRF_OLD=1; fi
+                if [[ "$SIGN" == "+" && "$BODY" =~ ^[[:space:]]*image:[[:space:]]*traefik:v${TNR}[[:space:]]*$ ]]; then OK=1; TRF_NEW=1; fi
+                ;;
+            esac
+            if [[ "$OK" != "1" ]]; then
+              note "unexpected ${SIGN} line in ${FILE:-<unknown file>}: ${BODY:0:80}"
             fi
-            sleep $(( attempt * 10 ))
-          done
+          done < diff.txt
+
+          # --- 3. Each claimed change must actually be present ------------------------
+          if [[ "$EC" == "true" ]]; then
+            (( ENV_OLD && ENV_NEW )) || note "STACK_VERSION ${EO} -> ${EN} not found in .env.example"
+            (( RDM_OLD && RDM_NEW )) || note "README Elastic badge ${EO} -> ${EN} not found"
+          fi
+          if [[ "$TC" == "true" ]]; then
+            (( TRF_OLD && TRF_NEW )) || note "traefik image v${TO} -> v${TN} not found"
+          fi
+
+          if [[ "$VERDICT" == "GO" ]]; then
+            REASON="diff is exactly the expected version bump"
+          else
+            REASON=$(printf '%s; ' "${REASONS[@]}" | tr -d '\n')
+            REASON="${REASON%; }"
+            REASON="${REASON:0:300}"
+          fi
 
           echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
           echo "reason=$REASON" >> "$GITHUB_OUTPUT"
@@ -342,7 +406,7 @@ jobs:
             echo ""
             echo "> ${REASON}"
             echo ""
-            echo "CI passed, but the diff doesn't look like a clean version bump. Please review — there's nothing for the Copilot agent to fix here, it needs your eyes."
+            echo "CI passed, but the diff is not exactly the expected version bump — see the reason above for what did not line up. Please review; there's nothing for the Copilot agent to fix here, it needs your eyes."
           } > nogo.md
           gh pr comment "$PR" --repo "$REPO" --body-file nogo.md
           gh pr edit "$PR" --repo "$REPO" --add-label version-update-blocked || true

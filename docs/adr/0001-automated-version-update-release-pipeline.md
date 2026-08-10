@@ -43,11 +43,26 @@ maintainer, and assigns the Copilot coding agent to investigate.
   create and approve pull requests"* to be enabled. Yes, the automation approves the
   automation — acceptable on a single-maintainer repo; that is exactly what the setting
   exists for.
-- **The Go/No-Go verdict is a model call, and the model is OpenAI, not Claude.** GitHub
-  Models (the no-API-key inference API reachable with `GITHUB_TOKEN` + `models: read`)
-  carries **no Anthropic/Claude models** — only OpenAI/Meta/Mistral/etc. So the gate uses
-  `openai/gpt-5`. Claude is reserved for the Copilot coding agent on the broken-release
-  path, where its code-fixing ability matters and it runs server-side on the maintainer's
+- **The Go/No-Go verdict is a deterministic diff check, not a model call.** The rule it
+  enforces is mechanical — the diff must be *exactly* the expected version strings, in
+  exactly the files implied by the PR metadata, and nothing else — and the workflow
+  already parses the expected old/new versions out of the PR body. So it is checked
+  directly against `gh pr diff`: the changed-file set must equal the expected set, every
+  `+`/`-` line must match the one edit its file is permitted to contain, and every
+  claimed change must actually be present. Anything unaccounted for is NO_GO.
+
+  This *was* a GitHub Models call (`openai/gpt-5`, reachable with `GITHUB_TOKEN` +
+  `models: read`, chosen because GitHub Models carries no Anthropic/Claude models). That
+  endpoint is being retired: on 2026-08-08 it returned `github_models_retirement_brownout`
+  to all three attempts, the fail-safe held the verdict at NO_GO, and a green,
+  provably-clean 9.5.0 bump was blocked with the misleading message "the diff doesn't
+  look like a clean version bump" — when in truth no verdict had been reached at all.
+  A decidable check should not have an availability dependency, a per-call cost, or a
+  nondeterministic answer. The rewrite also tightened the rule: the old prompt allowed a
+  static list of three files, whereas the check now requires the changed set to *match*
+  what the metadata claims, so a Traefik-only bump that also edits `.env.example` is
+  caught. Claude remains on the broken-release path via the Copilot coding agent, where
+  code-fixing judgement genuinely is needed and it runs server-side on the maintainer's
   Copilot Pro license (no key). The gate result is cast as an *approving review*, not
   Copilot's native code review — Copilot's review is comment-only and cannot satisfy a
   required-review rule. NO_GO blocks the merge and pings the maintainer; it is not the
