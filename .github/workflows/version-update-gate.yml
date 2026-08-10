@@ -237,13 +237,26 @@ jobs:
           # file — falls through to NO_GO.
           gh pr diff "$PR" --repo "$REPO" > diff.txt
 
-          FILE=""
+          # Filename comes from the `diff --git` header rather than `+++ b/...`, and the
+          # header/hunk boundary is tracked explicitly: everything before a file's first
+          # @@ is header (index/mode/---/+++/binary/rename), everything after is content.
+          # Two reasons this matters. A deletion ends its header with `+++ /dev/null`, so
+          # keying on `+++ b/` would leave FILE pointing at the *previous* file and
+          # misattribute the reason. And a content line reading "++ b/foo" appears in the
+          # diff as "+++ b/foo", which a positional match would mistake for a header —
+          # letting a smuggled line slip past unexamined.
+          FILE=""; IN_HUNK=0
           ENV_OLD=0; ENV_NEW=0; RDM_OLD=0; RDM_NEW=0; TRF_OLD=0; TRF_NEW=0
           while IFS= read -r line; do
             case "$line" in
-              '+++ b/'*) FILE="${line#+++ b/}"; continue ;;
-              '--- '*|'diff --git '*|'index '*|'@@'*|'new file mode'*|'deleted file mode'*|'similarity index'*|'rename '*) continue ;;
+              'diff --git '*)
+                REST="${line#diff --git }"
+                FILE="${REST##* b/}"          # b-side name; a/ and b/ agree except on rename
+                IN_HUNK=0
+                continue ;;
+              '@@'*) IN_HUNK=1; continue ;;
             esac
+            (( IN_HUNK )) || continue          # still in this file's header block
             SIGN="${line:0:1}"
             [[ "$SIGN" == "+" || "$SIGN" == "-" ]] || continue   # context line
             BODY="${line:1}"
