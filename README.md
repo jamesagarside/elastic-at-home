@@ -4,7 +4,7 @@
 [![Latest release](https://img.shields.io/github/v/release/jamesagarside/elastic-at-home)](https://github.com/jamesagarside/elastic-at-home/releases/latest)
 [![GitHub stars](https://img.shields.io/github/stars/jamesagarside/elastic-at-home?style=social)](https://github.com/jamesagarside/elastic-at-home/stargazers)
 [![Last commit](https://img.shields.io/github/last-commit/jamesagarside/elastic-at-home)](https://github.com/jamesagarside/elastic-at-home/commits)
-[![Elastic Stack](https://img.shields.io/badge/Elastic-9.5.0-005571?logo=elastic&logoColor=white)](https://www.elastic.co/)
+[![Elastic Stack](https://img.shields.io/badge/Elastic-9.5.1-005571?logo=elastic&logoColor=white)](https://www.elastic.co/)
 [![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
 [![Raspberry Pi](https://img.shields.io/badge/Raspberry%20Pi-5-C51A4A?logo=raspberrypi&logoColor=white)](https://www.raspberrypi.com/)
 [![Traefik](https://img.shields.io/badge/Traefik-v3-24A1C1?logo=traefikproxy&logoColor=white)](https://traefik.io/)
