@@ -3,7 +3,7 @@ services:
     depends_on:
       setup:
         condition: service_healthy
-    image: traefik:v3.7.10
+    image: traefik:v3.7.11
     container_name: traefik
     # ==========================================================================
     # Traefik Configuration File Selection
