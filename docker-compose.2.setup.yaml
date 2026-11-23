@@ -26,6 +26,8 @@ services:
     # Use the Elasticsearch image because it includes elasticsearch-certutil
     # which is the official tool for generating Elastic Stack certificates
     image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
+    # Come back by themselves after a reboot or power cut.
+    restart: unless-stopped
 
     volumes:
       # Mount the shared 'certs' volume where all certificates will be stored
@@ -155,6 +157,15 @@ services:
           find . -type d -exec chmod 750 \{\} \;;
           find . -type f -exec chmod 640 \{\} \;;
         fi;
+
+        # Trust bundle for the agents in this stack: system roots plus our CA.
+        # fleet-server and agent read it through SSL_CERT_FILE, so the default
+        # Fleet output needs no container-only CA paths and external agents
+        # can use it too. Rebuilt on every start so existing installs get it.
+        SYS_BUNDLE=$$(ls /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /etc/ssl/certs/ca-certificates.crt 2>/dev/null | head -1);
+        cat $$SYS_BUNDLE config/certs/ca/ca.crt > config/certs/ca/bundle.pem.tmp;
+        chmod 644 config/certs/ca/bundle.pem.tmp;
+        mv config/certs/ca/bundle.pem.tmp config/certs/ca/bundle.pem;
 
         # =====================================================================
         # PHASE 2: POST-STARTUP CONFIGURATION
@@ -331,7 +342,7 @@ services:
     # Other services wait for this container to be healthy before starting
     # The check runs every 1s with 5s timeout, up to 120 retries (2 minutes)
     healthcheck:
-      test: ["CMD-SHELL", "[ -f config/certs/es01/es01.crt ]"]
+      test: ["CMD-SHELL", "[ -f config/certs/ca/bundle.pem ]"]
       interval: 1s
       timeout: 5s
       retries: 120

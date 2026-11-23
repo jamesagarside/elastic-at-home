@@ -186,13 +186,28 @@ xpack.fleet.agentPolicies:
 
       # Syslog over TCP - more reliable than UDP (connection-oriented)
       # TCP ensures delivery with retransmission if packets are lost
-      # NOTE: TCP/UDP input port settings are configured via the Fleet API
-      # after Kibana starts, because preconfiguration doesn't support all
-      # input-type package variables. See docker-compose.4.kibana.yaml
+      #
+      # Traefik accepts syslog on host port 514 and forwards it to the agent
+      # container on 8080. The package default listen address is localhost,
+      # which Traefik can't reach, so the listener binds to 0.0.0.0 here.
       - package:
           name: tcp
         name: Siem Agent Syslog TCP
         id: siem-agent-syslog-tcp
+        inputs:
+          - type: tcp
+            enabled: true
+            streams:
+              - data_stream:
+                  dataset: tcp.tcp
+                enabled: true
+                vars:
+                  - name: listen_address
+                    value: 0.0.0.0
+                  - name: listen_port
+                    value: 8080
+                  - name: data_stream.dataset
+                    value: syslog.tcp
 
       # Syslog over UDP - connectionless, lower overhead
       # UDP is fire-and-forget - no delivery guarantee, but faster
@@ -200,6 +215,20 @@ xpack.fleet.agentPolicies:
           name: udp
         name: Siem Agent Syslog UDP
         id: siem-agent-syslog-udp
+        inputs:
+          - type: udp
+            enabled: true
+            streams:
+              - data_stream:
+                  dataset: udp.udp
+                enabled: true
+                vars:
+                  - name: listen_address
+                    value: 0.0.0.0
+                  - name: listen_port
+                    value: 8080
+                  - name: data_stream.dataset
+                    value: syslog.udp
 
 # =============================================================================
 # OUTPUTS
@@ -242,16 +271,15 @@ xpack.fleet.outputs:
     hosts: ["https://${ES_DOMAIN_NAME}:${EXTERNAL_ES_PORT}"]
     is_default: true            # New agents use this by default
     is_default_monitoring: true # Agent monitoring data goes here too
-    config:
-      ssl:
-        # Trust BOTH system CAs and our internal CA
-        # This works for all ingress modes:
-        #   - letsencrypt: Validated by system CAs (Let's Encrypt roots)
-        #   - selfsigned: Validated by our internal CA
-        #   - direct: Validated by our internal CA
-        certificate_authorities:
-          - /etc/ssl/certs/ca-bundle.crt  # System CA bundle
-          - /certs/ca/ca.crt              # Our internal CA
+    # No certificate_authorities on purpose. On the Basic licence every agent
+    # policy uses this default output, including agents on your laptops and
+    # servers, so file paths that only exist inside our containers would stop
+    # those agents shipping data. Instead, each agent trusts its system store:
+    #   - letsencrypt: Let's Encrypt roots are already trusted everywhere
+    #   - selfsigned/direct: install /certs/ca/ca.crt into the endpoint's OS
+    #     trust store (see README "Adding external agents")
+    #   - agents in this stack: SSL_CERT_FILE points at /certs/ca/bundle.pem,
+    #     which the setup container builds from the system roots plus our CA
 
 # =============================================================================
 # FLEET SERVER HOSTS

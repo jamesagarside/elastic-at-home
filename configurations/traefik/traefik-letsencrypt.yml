@@ -13,8 +13,10 @@
 log:
   level: INFO
 
+# Dashboard and API. Only reachable through the routers on the traefik
+# container (docker-compose.1.traefik.yaml), which TRAEFIK_DASHBOARD in .env
+# turns on or off. There's no login, so turn it off on networks you don't trust.
 api:
-  insecure: true
   dashboard: true
 
 ping: true
@@ -38,6 +40,9 @@ entryPoints:
           scheme: https
   websecure:
     address: ":443"
+  # Dashboard over plain HTTP on port 8080 (also serves the /ping healthcheck)
+  traefik:
+    address: ":8080"
   syslog-tcp:
     address: ":514"
   syslog-udp:

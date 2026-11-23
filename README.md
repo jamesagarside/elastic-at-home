@@ -54,7 +54,7 @@ Commercial home security tools are closed, data-hungry, and rarely cross-correla
 - **Slack alerting**: push high-severity detections to your phone
 - **Fleet-managed agents**: centrally configure every agent from Kibana
 - **Local LLM (optional)**: Ollama plus Google Gemma 4 E2B powers the Kibana AI Assistant without leaving your network
-- **Three ingress modes**: Let's Encrypt (public trust), self-signed (air-gapped), or direct IP:port (no DNS)
+- **Three ingress modes**: Let's Encrypt (public trust), self-signed (internal only), or direct IP:port (no DNS)
 - **One-command deployment**: `docker compose up -d` and the stack bootstraps itself
 
 ---
@@ -113,13 +113,21 @@ The setup uses Power over Ethernet, so you'll need a PoE-capable switch or injec
 > [!NOTE]
 > Some of these come from the official [Running Elasticsearch in Production](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-elasticsearch-docker-prod) guide.
 
-### 1. Set `vm.max_map_count` to at least `262144`
+### 1. Set `vm.max_map_count` to at least `1048576`
 
 > [!TIP]
 > Elasticsearch uses memory-mapped files for each Lucene segment. Busy nodes exhaust the default quickly, producing errors like `max virtual memory areas vm.max_map_count [65530] is too low`.
 
+Check the current value first. Raspberry Pi OS Trixie and other Debian 13 hosts already set `1048576`, so there's nothing to change:
+
 ```bash
-echo "vm.max_map_count=262144" | sudo tee -a /etc/sysctl.conf && sudo sysctl -p
+sysctl vm.max_map_count
+```
+
+If it's lower, set it in a drop-in file. Debian 13 no longer reads `/etc/sysctl.conf` at boot, so a drop-in is what persists across reboots:
+
+```bash
+echo "vm.max_map_count=1048576" | sudo tee /etc/sysctl.d/99-elasticsearch.conf && sudo sysctl --system
 ```
 
 ### 2. Disable swap
@@ -127,13 +135,21 @@ echo "vm.max_map_count=262144" | sudo tee -a /etc/sysctl.conf && sudo sysctl -p
 > [!TIP]
 > Elasticsearch is memory-hungry and blocks during Java GC. Swapping a hot page to disk turns a nanosecond read into a millisecond one. See the [Elastic guide on memory configuration](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/setup-configuration-memory).
 
-**Raspberry Pi OS** (uses `dphys-swapfile`):
+**Raspberry Pi OS Trixie** (uses `rpi-swap`, which sets up zram swap):
+
+```bash
+sudo mkdir -p /etc/rpi/swap.conf.d
+printf '[Main]\nMechanism=none\n' | sudo tee /etc/rpi/swap.conf.d/90-elasticsearch.conf
+sudo swapoff -a
+```
+
+**Raspberry Pi OS Bookworm and earlier** (uses `dphys-swapfile`):
 
 ```bash
 sudo dphys-swapfile swapoff && sudo dphys-swapfile uninstall && sudo systemctl disable dphys-swapfile
 ```
 
-**Other Debian/Ubuntu hosts** (no `dphys-swapfile`):
+**Other Debian/Ubuntu hosts:**
 
 ```bash
 sudo swapoff -a
@@ -262,7 +278,7 @@ elastic-at-home-es01-1          Up (healthy)
 elastic-at-home-kibana-1        Up (healthy)
 elastic-at-home-fleet-server-1  Up (healthy)
 elastic-at-home-agent-1         Up
-elastic-at-home-traefik-1       Up
+traefik                         Up (healthy)
 elastic-at-home-setup-1         Up (healthy)
 ```
 
@@ -303,6 +319,14 @@ elastic-at-home-setup-1         Up (healthy)
 
 > No DNS required. IP and port only.
 
+### Traefik dashboard
+
+The Traefik dashboard shows your routes and services. It's on by default at `https://<TRAEFIK_DOMAIN_NAME>` and `http://<host-ip>:8080/dashboard/`. It has no login, so anyone on your network can open it. To turn the dashboard and its API off, set this in `.env` and run `docker compose up -d`:
+
+```bash
+TRAEFIK_DASHBOARD=false
+```
+
 ### First login
 
 1. Navigate to Kibana in your browser
@@ -324,7 +348,7 @@ Elastic at Home supports three TLS/ingress modes. Pick the one that matches your
 
 | Mode             | Best for                     | Internet required | Trust chain                              | Access via        |
 | ---------------- | ---------------------------- | ----------------- | ---------------------------------------- | ----------------- |
-| **selfsigned**   | Air-gapped, internal only    | No                | Click-through (browser) / CA distribution (agents) | Hostname :443     |
+| **selfsigned**   | Internal only                | No                | Click-through (browser) / CA distribution (agents) | Hostname :443     |
 | **letsencrypt**  | Production, external agents  | Yes (ACME)        | Publicly trusted (automatic)             | Hostname :443     |
 | **direct**       | Dev, testing, no DNS         | No                | Click-through (browser) / CA distribution (agents) | IP : service-port |
 
@@ -405,21 +429,29 @@ This method requires internal DNS records your clients can resolve. Options incl
 
 ### Self-signed with Traefik
 
-**Best for:** air-gapped networks or internal-only deployments.
+**Best for:** internal-only deployments.
 
 Traefik reverse-proxies with certificates signed by Elasticsearch's built-in CA. All domain names are SANs in one certificate. Traefik validates backend service certs using the internal CA (no `insecureSkipVerify`).
 
 **Requirements:**
 
 - **Browsers:** click *Proceed* past the warning (use an incognito window to avoid cached cert issues)
-- **Agents:** distribute `ca.crt` and configure them to trust it
-- No internet access required
+- **Agents:** install `ca.crt` in each endpoint's OS trust store before you enrol it
+- Internet access to pull images and Fleet packages on first start
 
 Extract the CA for agents:
 
 ```bash
-docker cp $(docker compose ps -q setup):/certs/ca/ca.crt ./ca.crt
+docker cp $(docker compose ps -q setup):/usr/share/elasticsearch/config/certs/ca/ca.crt ./ca.crt
 ```
+
+On a Debian, Ubuntu, or Raspberry Pi OS endpoint, trust it like this:
+
+```bash
+sudo cp ca.crt /usr/local/share/ca-certificates/elastic-at-home.crt && sudo update-ca-certificates
+```
+
+On macOS, add it to the System keychain and set it to **Always Trust**. On Windows, import it into **Trusted Root Certification Authorities** for the local computer. Then run the enrolment command that Kibana shows. Agents read the CA from the OS trust store, so you don't need `--certificate-authorities`.
 
 Default mode; no `.env` changes needed:
 
@@ -549,10 +581,10 @@ Elastic at Home ships with optional support for a local Large Language Model via
 | -------------------- | ------------ |
 | Elasticsearch        | 4 GB         |
 | Ollama (Gemma 4 E2B) | 8 GB         |
-| Kibana               | 1 GB         |
+| Kibana               | 2 GB         |
 | Fleet Server         | 1 GB         |
 | Agent                | 1 GB         |
-| **Total**            | **~15 GB**   |
+| **Total**            | **~16 GB**   |
 
 | Resource | Requirement                    |
 | -------- | ------------------------------ |
@@ -561,7 +593,7 @@ Elastic at Home ships with optional support for a local Large Language Model via
 | GPU      | Not required (CPU inference)   |
 
 > [!NOTE]
-> When enabling the LLM, reduce `ES_MEM_LIMIT` to `4294967296` (4 GB) in `.env` to free memory for Ollama. Default without the LLM is 8 GB.
+> When enabling the LLM, reduce `ES_MEM_LIMIT` to `4294967296` (4 GB) in `.env` to free memory for Ollama. The default is already 4 GB.
 
 ### Enable the LLM
 
@@ -777,7 +809,7 @@ docker inspect --format='{{json .State.Health}}' elastic-at-home-<service>-1
 
 ```bash
 # Extract the CA
-docker cp $(docker compose ps -q setup):/certs/ca/ca.crt ./ca.crt
+docker cp $(docker compose ps -q setup):/usr/share/elasticsearch/config/certs/ca/ca.crt ./ca.crt
 ```
 
 Distribute `ca.crt` to agents and trust it. For browsers, add it to your system trust store or click through.
@@ -812,7 +844,7 @@ docker compose logs agent
 ### Memory / resource issues
 
 - Adjust limits in `.env` (`KB_MEM_LIMIT`, `ES_MEM_LIMIT`, etc.)
-- Confirm `sysctl vm.max_map_count` is 262144+
+- Confirm `sysctl vm.max_map_count` is 1048576 or higher
 - `docker stats`: see who's eating RAM
 
 **Recommended minimums:**
@@ -820,7 +852,7 @@ docker compose logs agent
 | Service       | RAM    |
 | ------------- | ------ |
 | Elasticsearch | 2 GB   |
-| Kibana        | 1 GB   |
+| Kibana        | 2 GB   |
 | Fleet Server  | 1 GB   |
 | Agent         | 512 MB |
 

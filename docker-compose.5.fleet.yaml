@@ -11,7 +11,8 @@ services:
     networks:
       - elastic
     user: root
-    restart: on-failure:3
+    # Come back by themselves after a reboot or power cut.
+    restart: unless-stopped
     extra_hosts:
       - "${ES_DOMAIN_NAME}:host-gateway"
       - "${FLEET_DOMAIN_NAME}:host-gateway"
@@ -24,6 +25,9 @@ services:
       - FLEET_SERVER_ELASTICSEARCH_USERNAME=elastic
       - FLEET_SERVER_ELASTICSEARCH_PASSWORD=${ELASTIC_PASSWORD}
       - FLEET_SERVER_ELASTICSEARCH_CA=/certs/ca/ca.crt
+      # Trust store for the default Fleet output (system roots + our CA),
+      # built by the setup container
+      - SSL_CERT_FILE=/certs/ca/bundle.pem
       # Kibana connection
       - KIBANA_HOST=https://kibana:5601
       - KIBANA_CA=/certs/ca/ca.crt
@@ -42,7 +46,7 @@ services:
       #   "Waiting on fleet-server input to be added to policy: fleet-server-policy"
       # and elastic-agent's default 2m wait expires with
       #   "timed out waiting for Fleet Server to start after 2m0s"
-      # which fails enrolment and burns one of the `restart: on-failure` attempts.
+      # which fails enrolment and forces a container restart.
       #
       # On a Raspberry Pi, or a busy CI runner, or when Ollama is competing for
       # memory, that preconfiguration routinely takes longer than 2 minutes, so
