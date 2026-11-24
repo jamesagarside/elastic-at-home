@@ -62,6 +62,8 @@ jobs:
 
     strategy:
       fail-fast: false
+      # Avoid starting three Elastic stacks and Ollama model pulls at once.
+      max-parallel: 1
       matrix:
         include:
           # Test 1: Self-signed mode, LLM enabled, no ingress
