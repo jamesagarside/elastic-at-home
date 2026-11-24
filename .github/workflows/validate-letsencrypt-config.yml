@@ -68,7 +68,7 @@ jobs:
           AGENT_DOMAIN_NAME=agent.example.com
           TRAEFIK_DOMAIN_NAME=proxy.example.com
           ALLOWED_SYSLOG_IPS=0.0.0.0/0
-          KB_MEM_LIMIT=1073741824
+          KB_MEM_LIMIT=2147483648
           ES_MEM_LIMIT=2147483648
           FLEET_MEM_LIMIT=1073741824
           AGENT_MEM_LIMIT=1073741824

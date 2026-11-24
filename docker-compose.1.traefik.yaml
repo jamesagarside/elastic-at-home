@@ -5,6 +5,8 @@ services:
         condition: service_healthy
     image: traefik:v3.8.0
     container_name: traefik
+    # Come back by themselves after a reboot or power cut.
+    restart: unless-stopped
     # ==========================================================================
     # Traefik Configuration File Selection
     # ==========================================================================
@@ -55,12 +57,22 @@ services:
       - ./configurations/traefik/traefik-${INGRESS_MODE:-selfsigned}-dynamic.yaml:/etc/traefik/dynamic.yaml:ro
     networks:
       - elastic
+    # --------------------------------------------------------------------------
+    # Traefik dashboard and API
+    # --------------------------------------------------------------------------
+    # TRAEFIK_DASHBOARD=false (in .env) removes both routers, so nothing serves
+    # the dashboard or API. When on, it's at https://${TRAEFIK_DOMAIN_NAME} and
+    # http://<host-ip>:8080/dashboard/ with no login.
+    # --------------------------------------------------------------------------
     labels:
-      - "traefik.enable=true"
+      - "traefik.enable=${TRAEFIK_DASHBOARD:-true}"
       - "traefik.http.routers.dashboard.rule=Host(`${TRAEFIK_DOMAIN_NAME}`)"
       - "traefik.http.routers.dashboard.entrypoints=websecure"
       - "traefik.http.routers.dashboard.tls.certresolver=${INGRESS_MODE:-}"
       - "traefik.http.routers.dashboard.service=api@internal"
+      - "traefik.http.routers.dashboard-port.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.dashboard-port.entrypoints=traefik"
+      - "traefik.http.routers.dashboard-port.service=api@internal"
     healthcheck:
       test: ["CMD-SHELL", "traefik healthcheck --ping"]
       interval: 10s

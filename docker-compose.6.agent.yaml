@@ -44,7 +44,8 @@ services:
 
     # Run as root to allow binding to privileged ports and accessing logs
     user: root
-    restart: on-failure:3
+    # Come back by themselves after a reboot or power cut.
+    restart: unless-stopped
 
     # -------------------------------------------------------------------------
     # EXTRA HOSTS - Resolve External Domains to Docker Host
@@ -84,12 +85,21 @@ services:
       # Which policy to enrol under - must match name in fleet-configuration.yaml
       - FLEET_TOKEN_POLICY_NAME=SIEM Agent Policy
 
-      # Fleet Server URL - where agent connects for management
-      # Uses external URL which routes through Traefik (via extra_hosts above)
-      - FLEET_URL=https://${FLEET_DOMAIN_NAME:-fleet-server:8220}
+      # Trust store for the default Fleet output (system roots + our CA),
+      # built by the setup container
+      - SSL_CERT_FILE=/certs/ca/bundle.pem
 
-      # Kibana URL - used during enrolment to register with Fleet
-      - KIBANA_HOST=https://${KIBANA_DOMAIN_NAME:-kibana:5601}
+      # Fleet Server URL - where agent connects for management
+      # Uses external URL which routes through Traefik (via extra_hosts above).
+      # It must match the default Fleet Server host in fleet-configuration.yaml
+      # exactly, port included. On every start the agent compares this with the
+      # URL it saved at enrolment, and any difference makes it enrol again as a
+      # new agent, leaving the old one offline in Fleet.
+      - FLEET_URL=https://${FLEET_DOMAIN_NAME}:${EXTERNAL_FLEET_PORT:-443}
+
+      # Kibana URL - only used to fetch the enrolment token. Talks to Kibana
+      # directly on the Docker network, which works the same in every mode.
+      - KIBANA_HOST=https://kibana:5601
 
     # -------------------------------------------------------------------------
     # TRAEFIK LABELS - Syslog Routing

@@ -9,12 +9,14 @@
 #
 # Agent Enrolment:
 #   Agents connecting to Fleet/ES should trust the CA certificate:
-#   docker cp $(docker compose ps -q setup):/certs/ca/ca.crt ./ca.crt
+#   docker cp $(docker compose ps -q setup):/usr/share/elasticsearch/config/certs/ca/ca.crt ./ca.crt
 #
 # No ACME/Let's Encrypt - works in air-gapped environments.
 
+# Dashboard and API. Only reachable through the routers on the traefik
+# container (docker-compose.1.traefik.yaml), which TRAEFIK_DASHBOARD in .env
+# turns on or off. There's no login, so turn it off on networks you don't trust.
 api:
-  insecure: true
   dashboard: true
 
 ping: true
@@ -40,6 +42,9 @@ entryPoints:
     address: ":443"
     http:
       tls: {}
+  # Dashboard over plain HTTP on port 8080 (also serves the /ping healthcheck)
+  traefik:
+    address: ":8080"
   syslog-tcp:
     address: ":514"
   syslog-udp:
